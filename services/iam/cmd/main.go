@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"time"
 
 	"github.com/nooman57554/The_Orb/orb_libs/dbconnector"
 )
@@ -12,7 +13,14 @@ func main() {
 
 	databaseURL := "postgres://platform:platform@localhost:5432/platform"
 
-	db, err := dbconnector.New(ctx, databaseURL)
+	db, err := dbconnector.New(ctx, dbconnector.Config{
+		DatabaseURL:     databaseURL,
+		MaxConns:        10,
+		MinConns:        2,
+		MaxConnLifetime: 30 * time.Minute,
+		MaxConnIdleTime: 5 * time.Minute,
+		HealthCheckTime: 1 * time.Minute,
+	})
 	if err != nil {
 		log.Fatalf("failed to connect to database: %v", err)
 	}
