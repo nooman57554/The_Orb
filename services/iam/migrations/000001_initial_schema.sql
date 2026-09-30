@@ -1,4 +1,3 @@
-CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 CREATE EXTENSION IF NOT EXISTS "citext";
 
 -- ============================================================
@@ -8,8 +7,8 @@ CREATE EXTENSION IF NOT EXISTS "citext";
 CREATE OR REPLACE FUNCTION trigger_set_timestamp()
 RETURNS TRIGGER AS $$
 BEGIN
-  NEW.updated_at = NOW();
-  RETURN NEW;
+    NEW.updated_at = NOW();
+    RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 
@@ -18,7 +17,7 @@ $$ LANGUAGE plpgsql;
 -- ============================================================
 
 CREATE TABLE users (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID PRIMARY KEY,
 
     email CITEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
@@ -42,7 +41,7 @@ FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
 -- ============================================================
 
 CREATE TABLE tenants (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID PRIMARY KEY,
 
     name TEXT NOT NULL,
     slug TEXT NOT NULL UNIQUE,
@@ -66,11 +65,15 @@ FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
 -- ============================================================
 
 CREATE TABLE roles (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID PRIMARY KEY,
 
-    name TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
 
     scope TEXT NOT NULL,
+
+    tenant_id UUID
+        REFERENCES tenants(id)
+        ON DELETE CASCADE,
 
     description TEXT,
 
@@ -78,12 +81,43 @@ CREATE TABLE roles (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
     CONSTRAINT roles_scope_check
-        CHECK (scope IN ('platform', 'tenant'))
+        CHECK (
+            scope IN (
+                'platform',
+                'system_tenant',
+                'custom_tenant'
+            )
+        ),
+
+    CONSTRAINT roles_scope_tenant_check
+        CHECK (
+            (scope = 'platform' AND tenant_id IS NULL)
+            OR
+            (scope = 'system_tenant' AND tenant_id IS NULL)
+            OR
+            (scope = 'custom_tenant' AND tenant_id IS NOT NULL)
+        )
 );
 
 CREATE TRIGGER set_timestamp_roles
 BEFORE UPDATE ON roles
 FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
+
+CREATE UNIQUE INDEX uq_platform_role_name
+    ON roles(name)
+    WHERE scope = 'platform';
+
+CREATE UNIQUE INDEX uq_system_tenant_role_name
+    ON roles(name)
+    WHERE scope = 'system_tenant';
+
+CREATE UNIQUE INDEX uq_custom_tenant_role_name
+    ON roles(tenant_id, name)
+    WHERE scope = 'custom_tenant';
+
+CREATE INDEX idx_roles_custom_tenant
+    ON roles(tenant_id)
+    WHERE scope = 'custom_tenant';
 
 
 -- ============================================================
@@ -91,7 +125,7 @@ FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
 -- ============================================================
 
 CREATE TABLE permissions (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID PRIMARY KEY,
 
     name TEXT NOT NULL UNIQUE,
     description TEXT,
@@ -168,7 +202,7 @@ CREATE INDEX idx_tenant_role_assignments_tenant_id ON tenant_role_assignments(te
 -- ============================================================
 
 CREATE TABLE sessions (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID PRIMARY KEY,
 
     user_id UUID NOT NULL
         REFERENCES users(id)
@@ -184,6 +218,7 @@ CREATE TABLE sessions (
 );
 
 CREATE INDEX idx_sessions_user_id ON sessions(user_id);
+CREATE INDEX idx_sessions_expires_at ON sessions(expires_at);
 
 
 -- ============================================================
@@ -191,7 +226,7 @@ CREATE INDEX idx_sessions_user_id ON sessions(user_id);
 -- ============================================================
 
 CREATE TABLE tenant_invitations (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID PRIMARY KEY,
 
     tenant_id UUID NOT NULL
         REFERENCES tenants(id)
@@ -224,7 +259,7 @@ CREATE INDEX idx_tenant_invitations_email ON tenant_invitations(email);
 -- ============================================================
 
 CREATE TABLE service_accounts (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID PRIMARY KEY,
 
     tenant_id UUID NOT NULL
         REFERENCES tenants(id)
@@ -253,7 +288,7 @@ FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
 -- ============================================================
 
 CREATE TABLE api_credentials (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID PRIMARY KEY,
 
     service_account_id UUID NOT NULL
         REFERENCES service_accounts(id)
@@ -280,7 +315,7 @@ CREATE TABLE api_credentials (
 -- ============================================================
 
 CREATE TABLE tenant_resources (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID PRIMARY KEY,
 
     tenant_id UUID NOT NULL
         REFERENCES tenants(id)
