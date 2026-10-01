@@ -17,6 +17,8 @@ type PostgresUserRepository struct {
 	db *dbconnector.DBConnector
 }
 
+var _ UserRepository = (*PostgresUserRepository)(nil)
+
 func NewPostgresUserRepository(
 	db *dbconnector.DBConnector,
 ) *PostgresUserRepository {
@@ -131,6 +133,42 @@ func (r *PostgresUserRepository) Create(
 
 	if err != nil {
 		return fmt.Errorf("create user: %w", err)
+	}
+
+	return nil
+}
+
+func (r *PostgresUserRepository) Update(
+	ctx context.Context,
+	user *model.User,
+) error {
+
+	const query = `
+		UPDATE users
+		SET
+			email = $1,
+			password_hash = $2,
+			status = $3
+		WHERE id = $4
+		RETURNING updated_at
+	`
+
+	err := r.db.Pool().QueryRow(
+		ctx,
+		query,
+		user.Email,
+		user.PasswordHash,
+		user.Status,
+		user.ID,
+	).Scan(
+		&user.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("user: %w", ErrNotFound)
+		}
+
+		return fmt.Errorf("update user: %w", err)
 	}
 
 	return nil
