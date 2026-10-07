@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/nooman57554/The_Orb/services/iam/repository"
 	"github.com/nooman57554/The_Orb/services/iam/service"
 )
 
@@ -106,6 +108,62 @@ func (h *UserHandler) CreateUser(
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Location", "/v1/users/"+user.ID.String())
 	w.WriteHeader(http.StatusCreated)
+
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (h *UserHandler) GetUser(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	userID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeProblem(
+			w,
+			http.StatusBadRequest,
+			"Invalid Request",
+			"User ID must be a valid UUID.",
+		)
+		return
+	}
+
+	user, err := h.userService.GetUserByID(r.Context(), userID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			writeProblem(
+				w,
+				http.StatusNotFound,
+				"User Not Found",
+				"The requested user was not found.",
+			)
+			return
+		}
+
+		writeProblem(
+			w,
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			"An unexpected error occurred.",
+		)
+		return
+	}
+
+	response := struct {
+		ID        string `json:"id"`
+		Email     string `json:"email"`
+		Status    string `json:"status"`
+		CreatedAt string `json:"created_at"`
+		UpdatedAt string `json:"updated_at"`
+	}{
+		ID:        user.ID.String(),
+		Email:     user.Email,
+		Status:    user.Status,
+		CreatedAt: user.CreatedAt.Format(time.RFC3339),
+		UpdatedAt: user.UpdatedAt.Format(time.RFC3339),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
 
 	_ = json.NewEncoder(w).Encode(response)
 }

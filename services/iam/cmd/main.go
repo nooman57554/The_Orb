@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"log"
+	"net/http"
 	"time"
 
 	"github.com/nooman57554/The_Orb/orb_libs/dbconnector"
+	"github.com/nooman57554/The_Orb/services/iam/handler"
 	"github.com/nooman57554/The_Orb/services/iam/repository"
 	"github.com/nooman57554/The_Orb/services/iam/service"
 )
@@ -30,8 +32,22 @@ func main() {
 
 	userRepo := repository.NewPostgresUserRepository(db)
 	userService := service.NewUserService(userRepo)
+	userHandler := handler.NewUserHandler(userService)
 
-	_ = userService
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/users", userHandler.CreateUser)
+	mux.HandleFunc("GET /v1/users/{id}", userHandler.GetUser)
+
+	server := &http.Server{
+		Addr:    ":8080",
+		Handler: mux,
+	}
+
+	log.Println("IAM server listening on :8080")
+
+	if err := server.ListenAndServe(); err != nil {
+		log.Fatalf("IAM server failed: %v", err)
+	}
 
 	log.Println("IAM initialized")
 }
