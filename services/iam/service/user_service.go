@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -116,4 +117,70 @@ func hashPassword(password string) (string, error) {
 		encodedSalt,
 		encodedHash,
 	), nil
+}
+
+func verifyPassword(password, encodedHash string) error {
+	parts := strings.Split(encodedHash, "$")
+
+	if len(parts) != 6 {
+		return errors.New("invalid password hash format")
+	}
+
+	if parts[1] != "argon2id" {
+		return errors.New("unsupported password hash algorithm")
+	}
+
+	var version int
+	var memory uint32
+	var iterations uint32
+	var parallelism uint8
+
+	_, err := fmt.Sscanf(
+		parts[2],
+		"v=%d",
+		&version,
+	)
+	if err != nil {
+		return errors.New("invalid argon2 version")
+	}
+
+	if version != 19 {
+		return errors.New("unsupported argon2 version")
+	}
+
+	_, err = fmt.Sscanf(
+		parts[3],
+		"m=%d,t=%d,p=%d",
+		&memory,
+		&iterations,
+		&parallelism,
+	)
+	if err != nil {
+		return errors.New("invalid argon2 parameters")
+	}
+
+	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
+	if err != nil {
+		return errors.New("invalid password salt")
+	}
+
+	expectedHash, err := base64.RawStdEncoding.DecodeString(parts[5])
+	if err != nil {
+		return errors.New("invalid password hash")
+	}
+
+	actualHash := argon2.IDKey(
+		[]byte(password),
+		salt,
+		iterations,
+		memory,
+		parallelism,
+		uint32(len(expectedHash)),
+	)
+
+	if subtle.ConstantTimeCompare(actualHash, expectedHash) == 0 {
+		return errors.New("invalid password")
+	}
+
+	return nil
 }
