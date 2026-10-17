@@ -22,7 +22,7 @@ func main() {
 	// load config
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("load IAM configuration: %w", err)
+		log.Fatalf("load IAM configuration: %v", err)
 	}
 
 	dbConfig := dbconnector.Config{
@@ -60,14 +60,25 @@ func main() {
 		cfg.JWTTTL,
 		cfg.RefreshTokenTTL,
 	)
-	_ = authService
+	if err != nil {
+		log.Fatalf("initialize auth service: %v", err)
+	}
 
 	// create handlers
 	userHandler := handler.NewUserHandler(userService)
+	authHandler := handler.NewAuthHandler(authService)
 
+	// Create router
 	mux := http.NewServeMux()
+
+	// User routes
 	mux.HandleFunc("POST /v1/users", userHandler.CreateUser)
 	mux.HandleFunc("GET /v1/users/{id}", userHandler.GetUser)
+
+	// Auth routes
+	mux.HandleFunc("POST /v1/auth/login", authHandler.Login)
+	mux.HandleFunc("POST /v1/auth/refresh", authHandler.Refresh)
+	mux.HandleFunc("POST /v1/auth/logout", authHandler.Logout)
 
 	server := &http.Server{
 		Addr:    ":8080",
