@@ -70,7 +70,7 @@ func getJWTManager() (*auth.JWTManager, error) {
 
 	keyLoader, err := keyloader.NewFileLoader(
 		cfg.JWTPrivateKeyPath,
-		cfg.JWTPublicKeyPath,
+		cfg.JWTPublicKeysDir,
 		cfg.JWTKeyID,
 	)
 	if err != nil {

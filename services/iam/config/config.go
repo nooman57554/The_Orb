@@ -3,12 +3,13 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
 type Config struct {
 	JWTPrivateKeyPath string
-	JWTPublicKeyPath  string
+	JWTPublicKeysDir  string
 	JWTKeyID          string
 	JWTIssuer         string
 	JWTAudience       string
@@ -17,26 +18,41 @@ type Config struct {
 
 func Load() (Config, error) {
 	cfg := Config{
-		JWTPrivateKeyPath: os.Getenv("ORB_IAM_JWT_PRIVATE_KEY_PATH"),
-		JWTPublicKeyPath:  os.Getenv("ORB_IAM_JWT_PUBLIC_KEY_PATH"),
-		JWTKeyID:          os.Getenv("ORB_IAM_JWT_KEY_ID"),
-		JWTIssuer:         os.Getenv("ORB_IAM_JWT_ISSUER"),
-		JWTAudience:       os.Getenv("ORB_IAM_JWT_AUDIENCE"),
+		JWTPrivateKeyPath: strings.TrimSpace(
+			os.Getenv("ORB_IAM_JWT_PRIVATE_KEY_PATH"),
+		),
+		JWTPublicKeysDir: strings.TrimSpace(
+			os.Getenv("ORB_IAM_JWT_PUBLIC_KEYS_DIR"),
+		),
+		JWTKeyID: strings.TrimSpace(
+			os.Getenv("ORB_IAM_JWT_ACTIVE_KEY_ID"),
+		),
+		JWTIssuer: strings.TrimSpace(
+			os.Getenv("ORB_IAM_JWT_ISSUER"),
+		),
+		JWTAudience: strings.TrimSpace(
+			os.Getenv("ORB_IAM_JWT_AUDIENCE"),
+		),
 	}
 
-	for name, value := range map[string]string{
-		"ORB_IAM_JWT_PRIVATE_KEY_PATH": cfg.JWTPrivateKeyPath,
-		"ORB_IAM_JWT_PUBLIC_KEY_PATH":  cfg.JWTPublicKeyPath,
-		"ORB_IAM_JWT_KEY_ID":           cfg.JWTKeyID,
-		"ORB_IAM_JWT_ISSUER":           cfg.JWTIssuer,
-		"ORB_IAM_JWT_AUDIENCE":         cfg.JWTAudience,
-	} {
-		if value == "" {
-			return Config{}, fmt.Errorf("%s is required", name)
+	required := []struct {
+		name  string
+		value string
+	}{
+		{"ORB_IAM_JWT_PRIVATE_KEY_PATH", cfg.JWTPrivateKeyPath},
+		{"ORB_IAM_JWT_PUBLIC_KEYS_DIR", cfg.JWTPublicKeysDir},
+		{"ORB_IAM_JWT_ACTIVE_KEY_ID", cfg.JWTKeyID},
+		{"ORB_IAM_JWT_ISSUER", cfg.JWTIssuer},
+		{"ORB_IAM_JWT_AUDIENCE", cfg.JWTAudience},
+	}
+
+	for _, item := range required {
+		if item.value == "" {
+			return Config{}, fmt.Errorf("%s is required", item.name)
 		}
 	}
 
-	ttl := os.Getenv("ORB_IAM_JWT_TTL")
+	ttl := strings.TrimSpace(os.Getenv("ORB_IAM_JWT_TTL"))
 	if ttl == "" {
 		ttl = "10m"
 	}
