@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/nooman57554/The_Orb/services/iam/middleware"
 	"github.com/nooman57554/The_Orb/services/iam/repository"
 	"github.com/nooman57554/The_Orb/services/iam/service"
 )
@@ -116,6 +117,17 @@ func (h *UserHandler) GetUser(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
+	claims, ok := middleware.ClaimsFromContext(r.Context())
+	if !ok || claims == nil || claims.UserID == uuid.Nil {
+		writeProblem(
+			w,
+			http.StatusUnauthorized,
+			"Unauthorized",
+			"Authentication is required.",
+		)
+		return
+	}
+
 	userID, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		writeProblem(
@@ -123,6 +135,16 @@ func (h *UserHandler) GetUser(
 			http.StatusBadRequest,
 			"Invalid Request",
 			"User ID must be a valid UUID.",
+		)
+		return
+	}
+
+	if claims.UserID != userID {
+		writeProblem(
+			w,
+			http.StatusForbidden,
+			"Forbidden",
+			"You are not authorized to access this resource.",
 		)
 		return
 	}

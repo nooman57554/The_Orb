@@ -166,3 +166,30 @@ func (r *PostgresSessionRepository) RevokeByRefreshTokenHash(
 
 	return nil
 }
+
+func (r *PostgresSessionRepository) IsActive(
+	ctx context.Context,
+	sessionID uuid.UUID,
+) (bool, error) {
+	if sessionID == uuid.Nil {
+		return false, nil
+	}
+
+	const query = `
+		SELECT EXISTS (
+			SELECT 1
+			FROM sessions
+			WHERE id = $1
+			  AND revoked_at IS NULL
+			  AND expires_at > NOW()
+		)
+	`
+
+	var active bool
+	err := r.db.Pool().QueryRow(ctx, query, sessionID).Scan(&active)
+	if err != nil {
+		return false, fmt.Errorf("check session active: %w", err)
+	}
+
+	return active, nil
+}

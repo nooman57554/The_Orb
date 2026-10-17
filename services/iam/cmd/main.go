@@ -12,6 +12,7 @@ import (
 	"github.com/nooman57554/The_Orb/services/iam/config"
 	"github.com/nooman57554/The_Orb/services/iam/handler"
 	"github.com/nooman57554/The_Orb/services/iam/keyloader"
+	"github.com/nooman57554/The_Orb/services/iam/middleware"
 	"github.com/nooman57554/The_Orb/services/iam/repository"
 	"github.com/nooman57554/The_Orb/services/iam/service"
 )
@@ -68,12 +69,18 @@ func main() {
 	userHandler := handler.NewUserHandler(userService)
 	authHandler := handler.NewAuthHandler(authService)
 
+	// create middleware
+	authMiddleware, err := middleware.NewAuthMiddleware(jwtManager, sessionRepo)
+	if err != nil {
+		log.Fatalf("initialize auth middleware: %v", err)
+	}
+
 	// Create router
 	mux := http.NewServeMux()
 
 	// User routes
 	mux.HandleFunc("POST /v1/users", userHandler.CreateUser)
-	mux.HandleFunc("GET /v1/users/{id}", userHandler.GetUser)
+	mux.Handle("GET /v1/users/{id}", authMiddleware.RequireAuth(http.HandlerFunc(userHandler.GetUser)))
 
 	// Auth routes
 	mux.HandleFunc("POST /v1/auth/login", authHandler.Login)

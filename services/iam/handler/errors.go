@@ -18,6 +18,15 @@ func writeProblem(
 	title string,
 	detail string,
 ) {
+	WriteProblem(w, status, title, detail)
+}
+
+func WriteProblem(
+	w http.ResponseWriter,
+	status int,
+	title string,
+	detail string,
+) {
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(status)
 
@@ -37,6 +46,18 @@ func titleToSlug(title string) string {
 		return "user-already-exists"
 	case "User Not Found":
 		return "user-not-found"
+	case "Unauthorized":
+		return "unauthorized"
+	case "Forbidden":
+		return "forbidden"
+	case "Service Unavailable":
+		return "service-unavailable"
+	case "Internal Server Error":
+		return "internal-server-error"
+	case "Invalid Credentials":
+		return "invalid-credentials"
+	case "Invalid Refresh Token":
+		return "invalid-refresh-token"
 	default:
 		return "internal-error"
 	}
