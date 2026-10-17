@@ -19,6 +19,12 @@ import (
 func main() {
 	ctx := context.Background()
 
+	// load config
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("load IAM configuration: %w", err)
+	}
+
 	dbConfig := dbconnector.Config{
 		DatabaseURL:     "postgres://orb:orb@localhost:5432/orb_control?sslmode=disable",
 		MaxConns:        10,
@@ -28,20 +34,35 @@ func main() {
 		HealthCheckTime: 1 * time.Minute,
 	}
 
+	// create DB connection pool
 	db, err := dbconnector.New(ctx, dbConfig)
 	if err != nil {
 		log.Fatalf("create database connector: %v", err)
 	}
 	defer db.Close()
 
-	jwtManager, err := getJWTManager()
+	// create JWT manager
+	jwtManager, err := getJWTManager(cfg)
 	if err != nil {
 		log.Fatalf("get JWT manager: %v", err)
 	}
 
+	// create repositories
 	userRepo := repository.NewPostgresUserRepository(db)
+	sessionRepo := repository.NewPostgresSessionRepository(db)
+
+	// create services
 	userService := service.NewUserService(userRepo)
-	authService := service.NewAuthService(userRepo)
+	authService, err := service.NewAuthService(
+		userRepo,
+		sessionRepo,
+		jwtManager,
+		cfg.JWTTTL,
+		cfg.RefreshTokenTTL,
+	)
+	_ = authService
+
+	// create handlers
 	userHandler := handler.NewUserHandler(userService)
 
 	mux := http.NewServeMux()
@@ -62,11 +83,7 @@ func main() {
 	log.Println("IAM initialized")
 }
 
-func getJWTManager() (*auth.JWTManager, error) {
-	cfg, err := config.Load()
-	if err != nil {
-		return nil, fmt.Errorf("load IAM configuration: %w", err)
-	}
+func getJWTManager(cfg config.Config) (*auth.JWTManager, error) {
 
 	keyLoader, err := keyloader.NewFileLoader(
 		cfg.JWTPrivateKeyPath,

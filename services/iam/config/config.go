@@ -14,6 +14,7 @@ type Config struct {
 	JWTIssuer         string
 	JWTAudience       string
 	JWTTTL            time.Duration
+	RefreshTokenTTL   time.Duration
 }
 
 func Load() (Config, error) {
@@ -56,12 +57,23 @@ func Load() (Config, error) {
 	if ttl == "" {
 		ttl = "10m"
 	}
-
 	parsedTTL, err := time.ParseDuration(ttl)
 	if err != nil || parsedTTL <= 0 {
 		return Config{}, fmt.Errorf("ORB_IAM_JWT_TTL must be a positive duration")
 	}
-
 	cfg.JWTTTL = parsedTTL
+
+	refreshTTL := strings.TrimSpace(os.Getenv("ORB_IAM_REFRESH_TOKEN_TTL"))
+	if refreshTTL == "" {
+		refreshTTL = "720h" // 30 days
+	}
+	parsedRefreshTTL, err := time.ParseDuration(refreshTTL)
+	if err != nil || parsedRefreshTTL <= 0 {
+		return Config{}, fmt.Errorf(
+			"ORB_IAM_REFRESH_TOKEN_TTL must be a positive duration",
+		)
+	}
+	cfg.RefreshTokenTTL = parsedRefreshTTL
+
 	return cfg, nil
 }
