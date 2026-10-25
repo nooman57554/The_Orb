@@ -1,0 +1,438 @@
+package config_test
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/nooman57554/The_Orb/services/iam/config"
+)
+
+// setupValidEnvironment creates temporary key files/dirs and returns a map
+// of valid environment variables.
+func setupValidEnvironment(t *testing.T) map[string]string {
+	t.Helper()
+
+	tempDir := t.TempDir()
+	privKeyPath := filepath.Join(tempDir, "private.pem")
+	if err := os.WriteFile(privKeyPath, []byte("fake-ed25519-pem"), 0600); err != nil {
+		t.Fatalf("write fake private key: %v", err)
+	}
+
+	pubKeysDir := filepath.Join(tempDir, "public")
+	if err := os.Mkdir(pubKeysDir, 0700); err != nil {
+		t.Fatalf("create fake public keys dir: %v", err)
+	}
+
+	return map[string]string{
+		"ORB_IAM_HTTP_ADDR":             ":8080",
+		"ORB_IAM_HTTP_READ_TIMEOUT":     "10s",
+		"ORB_IAM_HTTP_WRITE_TIMEOUT":    "10s",
+		"ORB_IAM_HTTP_IDLE_TIMEOUT":     "30s",
+		"ORB_IAM_DATABASE_URL":          "postgres://user:secret@localhost:5432/orb_db?sslmode=disable",
+		"ORB_IAM_DB_MAX_CONNS":          "20",
+		"ORB_IAM_DB_MIN_CONNS":          "5",
+		"ORB_IAM_DB_MAX_CONN_LIFETIME":  "1h",
+		"ORB_IAM_DB_MAX_CONN_IDLE_TIME": "10m",
+		"ORB_IAM_DB_HEALTH_CHECK_TIME":  "2m",
+		"ORB_IAM_JWT_PRIVATE_KEY_PATH":  privKeyPath,
+		"ORB_IAM_JWT_PUBLIC_KEYS_DIR":   pubKeysDir,
+		"ORB_IAM_JWT_ACTIVE_KEY_ID":     "key-2026-01",
+		"ORB_IAM_JWT_ISSUER":            "orb-iam",
+		"ORB_IAM_JWT_AUDIENCE":          "orb-platform",
+		"ORB_IAM_JWT_TTL":               "15m",
+		"ORB_IAM_REFRESH_TOKEN_TTL":     "168h",
+	}
+}
+
+func lookupFromMap(env map[string]string) func(string) string {
+	return func(key string) string {
+		return env[key]
+	}
+}
+
+func TestLoad_ValidFullConfig(t *testing.T) {
+	env := setupValidEnvironment(t)
+
+	cfg, err := config.LoadFromLookup(lookupFromMap(env))
+	if err != nil {
+		t.Fatalf("expected valid config to load, got: %v", err)
+	}
+
+	if cfg.HTTPAddr != ":8080" {
+		t.Errorf("HTTPAddr = %v, want :8080", cfg.HTTPAddr)
+	}
+	if cfg.HTTPReadTimeout != 10*time.Second {
+		t.Errorf("HTTPReadTimeout = %v, want 10s", cfg.HTTPReadTimeout)
+	}
+	if cfg.HTTPWriteTimeout != 10*time.Second {
+		t.Errorf("HTTPWriteTimeout = %v, want 10s", cfg.HTTPWriteTimeout)
+	}
+	if cfg.HTTPIdleTimeout != 30*time.Second {
+		t.Errorf("HTTPIdleTimeout = %v, want 30s", cfg.HTTPIdleTimeout)
+	}
+	if cfg.DatabaseURL != env["ORB_IAM_DATABASE_URL"] {
+		t.Errorf("DatabaseURL mismatch")
+	}
+	if cfg.DBMaxConns != 20 {
+		t.Errorf("DBMaxConns = %v, want 20", cfg.DBMaxConns)
+	}
+	if cfg.DBMinConns != 5 {
+		t.Errorf("DBMinConns = %v, want 5", cfg.DBMinConns)
+	}
+	if cfg.DBMaxConnLifetime != 1*time.Hour {
+		t.Errorf("DBMaxConnLifetime = %v, want 1h", cfg.DBMaxConnLifetime)
+	}
+	if cfg.DBMaxConnIdleTime != 10*time.Minute {
+		t.Errorf("DBMaxConnIdleTime = %v, want 10m", cfg.DBMaxConnIdleTime)
+	}
+	if cfg.DBHealthCheckTime != 2*time.Minute {
+		t.Errorf("DBHealthCheckTime = %v, want 2m", cfg.DBHealthCheckTime)
+	}
+	if cfg.JWTKeyID != "key-2026-01" {
+		t.Errorf("JWTKeyID = %v, want key-2026-01", cfg.JWTKeyID)
+	}
+	if cfg.JWTIssuer != "orb-iam" {
+		t.Errorf("JWTIssuer = %v, want orb-iam", cfg.JWTIssuer)
+	}
+	if cfg.JWTAudience != "orb-platform" {
+		t.Errorf("JWTAudience = %v, want orb-platform", cfg.JWTAudience)
+	}
+	if cfg.JWTTTL != 15*time.Minute {
+		t.Errorf("JWTTTL = %v, want 15m", cfg.JWTTTL)
+	}
+	if cfg.RefreshTokenTTL != 168*time.Hour {
+		t.Errorf("RefreshTokenTTL = %v, want 168h", cfg.RefreshTokenTTL)
+	}
+
+	// Verify DatabaseConfig() helper
+	dbCfg := cfg.DatabaseConfig()
+	if dbCfg.DatabaseURL != cfg.DatabaseURL || dbCfg.MaxConns != 20 || dbCfg.MinConns != 5 {
+		t.Errorf("DatabaseConfig() fields mismatch: %+v", dbCfg)
+	}
+}
+
+func TestLoad_ValidDefaults(t *testing.T) {
+	baseEnv := setupValidEnvironment(t)
+
+	// Keep only required variables
+	minimalEnv := map[string]string{
+		"ORB_IAM_DATABASE_URL":         baseEnv["ORB_IAM_DATABASE_URL"],
+		"ORB_IAM_JWT_PRIVATE_KEY_PATH": baseEnv["ORB_IAM_JWT_PRIVATE_KEY_PATH"],
+		"ORB_IAM_JWT_PUBLIC_KEYS_DIR":  baseEnv["ORB_IAM_JWT_PUBLIC_KEYS_DIR"],
+		"ORB_IAM_JWT_ACTIVE_KEY_ID":    baseEnv["ORB_IAM_JWT_ACTIVE_KEY_ID"],
+		"ORB_IAM_JWT_ISSUER":           baseEnv["ORB_IAM_JWT_ISSUER"],
+		"ORB_IAM_JWT_AUDIENCE":         baseEnv["ORB_IAM_JWT_AUDIENCE"],
+	}
+
+	cfg, err := config.LoadFromLookup(lookupFromMap(minimalEnv))
+	if err != nil {
+		t.Fatalf("expected defaults to load successfully, got: %v", err)
+	}
+
+	// Check default values
+	if cfg.HTTPAddr != ":8080" {
+		t.Errorf("default HTTPAddr = %v, want :8080", cfg.HTTPAddr)
+	}
+	if cfg.HTTPReadTimeout != 15*time.Second {
+		t.Errorf("default HTTPReadTimeout = %v, want 15s", cfg.HTTPReadTimeout)
+	}
+	if cfg.HTTPWriteTimeout != 15*time.Second {
+		t.Errorf("default HTTPWriteTimeout = %v, want 15s", cfg.HTTPWriteTimeout)
+	}
+	if cfg.HTTPIdleTimeout != 60*time.Second {
+		t.Errorf("default HTTPIdleTimeout = %v, want 60s", cfg.HTTPIdleTimeout)
+	}
+	if cfg.DBMaxConns != 10 {
+		t.Errorf("default DBMaxConns = %v, want 10", cfg.DBMaxConns)
+	}
+	if cfg.DBMinConns != 2 {
+		t.Errorf("default DBMinConns = %v, want 2", cfg.DBMinConns)
+	}
+	if cfg.DBMaxConnLifetime != 30*time.Minute {
+		t.Errorf("default DBMaxConnLifetime = %v, want 30m", cfg.DBMaxConnLifetime)
+	}
+	if cfg.DBMaxConnIdleTime != 5*time.Minute {
+		t.Errorf("default DBMaxConnIdleTime = %v, want 5m", cfg.DBMaxConnIdleTime)
+	}
+	if cfg.DBHealthCheckTime != 1*time.Minute {
+		t.Errorf("default DBHealthCheckTime = %v, want 1m", cfg.DBHealthCheckTime)
+	}
+	if cfg.JWTTTL != 10*time.Minute {
+		t.Errorf("default JWTTTL = %v, want 10m", cfg.JWTTTL)
+	}
+	if cfg.RefreshTokenTTL != 720*time.Hour {
+		t.Errorf("default RefreshTokenTTL = %v, want 720h", cfg.RefreshTokenTTL)
+	}
+}
+
+func TestLoad_MissingRequiredFields(t *testing.T) {
+	requiredFields := []string{
+		"ORB_IAM_DATABASE_URL",
+		"ORB_IAM_JWT_PRIVATE_KEY_PATH",
+		"ORB_IAM_JWT_PUBLIC_KEYS_DIR",
+		"ORB_IAM_JWT_ACTIVE_KEY_ID",
+		"ORB_IAM_JWT_ISSUER",
+		"ORB_IAM_JWT_AUDIENCE",
+	}
+
+	for _, field := range requiredFields {
+		t.Run("missing_"+field, func(t *testing.T) {
+			env := setupValidEnvironment(t)
+			delete(env, field)
+
+			_, err := config.LoadFromLookup(lookupFromMap(env))
+			if err == nil {
+				t.Fatalf("expected error for missing %s, got nil", field)
+			}
+			if !strings.Contains(err.Error(), field) {
+				t.Errorf("error %q should mention missing field %q", err.Error(), field)
+			}
+		})
+
+		t.Run("empty_"+field, func(t *testing.T) {
+			env := setupValidEnvironment(t)
+			env[field] = "   "
+
+			_, err := config.LoadFromLookup(lookupFromMap(env))
+			if err == nil {
+				t.Fatalf("expected error for empty %s, got nil", field)
+			}
+			if !strings.Contains(err.Error(), field) {
+				t.Errorf("error %q should mention empty field %q", err.Error(), field)
+			}
+		})
+	}
+}
+
+func TestLoad_MalformedValues(t *testing.T) {
+	tests := []struct {
+		name          string
+		modifyEnv     func(env map[string]string)
+		wantErrSubstr string
+	}{
+		{
+			name: "malformed database url",
+			modifyEnv: func(env map[string]string) {
+				env["ORB_IAM_DATABASE_URL"] = "not_a_valid_postgres_url://:/"
+			},
+			wantErrSubstr: "ORB_IAM_DATABASE_URL is invalid",
+		},
+		{
+			name: "invalid active key ID containing dot",
+			modifyEnv: func(env map[string]string) {
+				env["ORB_IAM_JWT_ACTIVE_KEY_ID"] = "."
+			},
+			wantErrSubstr: "ORB_IAM_JWT_ACTIVE_KEY_ID is invalid",
+		},
+		{
+			name: "invalid active key ID containing slashes",
+			modifyEnv: func(env map[string]string) {
+				env["ORB_IAM_JWT_ACTIVE_KEY_ID"] = "keys/active-key"
+			},
+			wantErrSubstr: "ORB_IAM_JWT_ACTIVE_KEY_ID is invalid",
+		},
+		{
+			name: "invalid issuer containing newlines",
+			modifyEnv: func(env map[string]string) {
+				env["ORB_IAM_JWT_ISSUER"] = "orb-iam\ninjection"
+			},
+			wantErrSubstr: "ORB_IAM_JWT_ISSUER is invalid",
+		},
+		{
+			name: "invalid audience containing control characters",
+			modifyEnv: func(env map[string]string) {
+				env["ORB_IAM_JWT_AUDIENCE"] = "orb-platform\x00"
+			},
+			wantErrSubstr: "ORB_IAM_JWT_AUDIENCE is invalid",
+		},
+		{
+			name: "invalid http address missing port",
+			modifyEnv: func(env map[string]string) {
+				env["ORB_IAM_HTTP_ADDR"] = "notanaddress"
+			},
+			wantErrSubstr: "ORB_IAM_HTTP_ADDR is invalid",
+		},
+		{
+			name: "invalid http address port out of range",
+			modifyEnv: func(env map[string]string) {
+				env["ORB_IAM_HTTP_ADDR"] = ":70000"
+			},
+			wantErrSubstr: "ORB_IAM_HTTP_ADDR port must be between 1 and 65535",
+		},
+		{
+			name: "malformed jwt ttl",
+			modifyEnv: func(env map[string]string) {
+				env["ORB_IAM_JWT_TTL"] = "invalid-duration"
+			},
+			wantErrSubstr: "ORB_IAM_JWT_TTL must be a positive duration",
+		},
+		{
+			name: "negative jwt ttl",
+			modifyEnv: func(env map[string]string) {
+				env["ORB_IAM_JWT_TTL"] = "-5m"
+			},
+			wantErrSubstr: "ORB_IAM_JWT_TTL must be a positive duration",
+		},
+		{
+			name: "malformed refresh token ttl",
+			modifyEnv: func(env map[string]string) {
+				env["ORB_IAM_REFRESH_TOKEN_TTL"] = "0s"
+			},
+			wantErrSubstr: "ORB_IAM_REFRESH_TOKEN_TTL must be a positive duration",
+		},
+		{
+			name: "db max conns zero",
+			modifyEnv: func(env map[string]string) {
+				env["ORB_IAM_DB_MAX_CONNS"] = "0"
+			},
+			wantErrSubstr: "ORB_IAM_DB_MAX_CONNS must be greater than 0",
+		},
+		{
+			name: "db min conns negative",
+			modifyEnv: func(env map[string]string) {
+				env["ORB_IAM_DB_MIN_CONNS"] = "-1"
+			},
+			wantErrSubstr: "ORB_IAM_DB_MIN_CONNS cannot be negative",
+		},
+		{
+			name: "db min conns exceeds max conns",
+			modifyEnv: func(env map[string]string) {
+				env["ORB_IAM_DB_MAX_CONNS"] = "5"
+				env["ORB_IAM_DB_MIN_CONNS"] = "10"
+			},
+			wantErrSubstr: "cannot exceed ORB_IAM_DB_MAX_CONNS",
+		},
+		{
+			name: "malformed read timeout",
+			modifyEnv: func(env map[string]string) {
+				env["ORB_IAM_HTTP_READ_TIMEOUT"] = "bad"
+			},
+			wantErrSubstr: "ORB_IAM_HTTP_READ_TIMEOUT must be a positive duration",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := setupValidEnvironment(t)
+			tt.modifyEnv(env)
+
+			_, err := config.LoadFromLookup(lookupFromMap(env))
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tt.wantErrSubstr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErrSubstr) {
+				t.Errorf("error %q does not contain expected substring %q", err.Error(), tt.wantErrSubstr)
+			}
+		})
+	}
+}
+
+func TestLoad_UnusableKeyPaths(t *testing.T) {
+	t.Run("private key file does not exist", func(t *testing.T) {
+		env := setupValidEnvironment(t)
+		env["ORB_IAM_JWT_PRIVATE_KEY_PATH"] = filepath.Join(t.TempDir(), "nonexistent.pem")
+
+		_, err := config.LoadFromLookup(lookupFromMap(env))
+		if err == nil {
+			t.Fatal("expected error for nonexistent private key, got nil")
+		}
+		if !strings.Contains(err.Error(), "ORB_IAM_JWT_PRIVATE_KEY_PATH is unusable") {
+			t.Errorf("expected unusable private key error, got: %v", err)
+		}
+	})
+
+	t.Run("private key path is a directory", func(t *testing.T) {
+		env := setupValidEnvironment(t)
+		env["ORB_IAM_JWT_PRIVATE_KEY_PATH"] = t.TempDir()
+
+		_, err := config.LoadFromLookup(lookupFromMap(env))
+		if err == nil {
+			t.Fatal("expected error when private key path is directory, got nil")
+		}
+		if !strings.Contains(err.Error(), "path is a directory") {
+			t.Errorf("expected directory error, got: %v", err)
+		}
+	})
+
+	t.Run("public keys dir does not exist", func(t *testing.T) {
+		env := setupValidEnvironment(t)
+		env["ORB_IAM_JWT_PUBLIC_KEYS_DIR"] = filepath.Join(t.TempDir(), "nonexistent_dir")
+
+		_, err := config.LoadFromLookup(lookupFromMap(env))
+		if err == nil {
+			t.Fatal("expected error for nonexistent public keys dir, got nil")
+		}
+		if !strings.Contains(err.Error(), "ORB_IAM_JWT_PUBLIC_KEYS_DIR is unusable") {
+			t.Errorf("expected unusable public keys dir error, got: %v", err)
+		}
+	})
+
+	t.Run("public keys dir is a file", func(t *testing.T) {
+		env := setupValidEnvironment(t)
+		filePath := filepath.Join(t.TempDir(), "file.txt")
+		_ = os.WriteFile(filePath, []byte("test"), 0600)
+		env["ORB_IAM_JWT_PUBLIC_KEYS_DIR"] = filePath
+
+		_, err := config.LoadFromLookup(lookupFromMap(env))
+		if err == nil {
+			t.Fatal("expected error when public keys dir is a file, got nil")
+		}
+		if !strings.Contains(err.Error(), "path is not a directory") {
+			t.Errorf("expected not a directory error, got: %v", err)
+		}
+	})
+}
+
+func TestRedactDatabaseURL(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "url with password",
+			input:    "postgres://admin:super_secret_password@10.0.0.1:5432/mydb?sslmode=disable",
+			expected: "postgres://admin:REDACTED@10.0.0.1:5432/mydb?sslmode=disable",
+		},
+		{
+			name:     "url without password",
+			input:    "postgres://localhost:5432/mydb",
+			expected: "postgres://localhost:5432/mydb",
+		},
+		{
+			name:     "empty url",
+			input:    "",
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := config.RedactDatabaseURL(tt.input)
+			if got != tt.expected {
+				t.Errorf("RedactDatabaseURL(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+			if strings.Contains(got, "super_secret_password") {
+				t.Errorf("Redacted URL leaked password: %s", got)
+			}
+		})
+	}
+}
+
+func TestLoad_UsingOsGetenv(t *testing.T) {
+	env := setupValidEnvironment(t)
+	for k, v := range env {
+		t.Setenv(k, v)
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("expected Load() with os.Getenv to succeed, got: %v", err)
+	}
+	if cfg.DatabaseURL != env["ORB_IAM_DATABASE_URL"] {
+		t.Errorf("DatabaseURL mismatch")
+	}
+}

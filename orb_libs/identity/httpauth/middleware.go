@@ -55,7 +55,6 @@ func NewBearerMiddleware(
 }
 
 // AllowPublic registers an explicit public route by HTTP method and exact path.
-//
 // Lifecycle: AllowPublic must only be called during server setup and initialization,
 // before concurrent request handling begins. It is not thread-safe for concurrent
 // modification once the server starts processing requests.

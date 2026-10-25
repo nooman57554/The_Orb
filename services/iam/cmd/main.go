@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"time"
 
 	"github.com/nooman57554/The_Orb/orb_libs/dbconnector"
 	"github.com/nooman57554/The_Orb/orb_libs/identity/httpauth"
@@ -27,17 +26,8 @@ func main() {
 		log.Fatalf("load IAM configuration: %v", err)
 	}
 
-	dbConfig := dbconnector.Config{
-		DatabaseURL:     "postgres://orb:orb@localhost:5432/orb_control?sslmode=disable",
-		MaxConns:        10,
-		MinConns:        2,
-		MaxConnLifetime: 30 * time.Minute,
-		MaxConnIdleTime: 5 * time.Minute,
-		HealthCheckTime: 1 * time.Minute,
-	}
-
 	// create DB connection pool
-	db, err := dbconnector.New(ctx, dbConfig)
+	db, err := dbconnector.New(ctx, cfg.DatabaseConfig())
 	if err != nil {
 		log.Fatalf("create database connector: %v", err)
 	}
@@ -96,13 +86,16 @@ func main() {
 	mux.HandleFunc("POST /v1/auth/logout", authHandler.Logout)
 
 	server := &http.Server{
-		Addr:    ":8080",
-		Handler: bearerMiddleware.Require(mux),
+		Addr:         cfg.HTTPAddr,
+		Handler:      bearerMiddleware.Require(mux),
+		ReadTimeout:  cfg.HTTPReadTimeout,
+		WriteTimeout: cfg.HTTPWriteTimeout,
+		IdleTimeout:  cfg.HTTPIdleTimeout,
 	}
 
-	log.Println("IAM server listening on :8080")
+	log.Printf("IAM server listening on %s", cfg.HTTPAddr)
 
-	if err := server.ListenAndServe(); err != nil {
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("IAM server failed: %v", err)
 	}
 
