@@ -42,6 +42,8 @@ func main() {
 	// create repositories
 	userRepo := repository.NewPostgresUserRepository(db)
 	sessionRepo := repository.NewPostgresSessionRepository(db)
+	authzRepo := repository.NewPostgresAuthorizationRepository(db)
+	tenantRepo := repository.NewPostgresTenantRepository(db)
 
 	// create services
 	userService := service.NewUserService(userRepo)
@@ -57,9 +59,15 @@ func main() {
 		log.Fatalf("initialize auth service: %v", err)
 	}
 
+	authzService, err := service.NewAuthorizationService(authzRepo)
+	if err != nil {
+		log.Fatalf("initialize authorization service: %v", err)
+	}
+
 	// create handlers
-	userHandler := handler.NewUserHandler(userService)
+	userHandler := handler.NewUserHandler(userService, authzService)
 	authHandler := handler.NewAuthHandler(authService)
+	tenantHandler := handler.NewTenantHandler(tenantRepo, authzService)
 
 	// create bearer middleware with default-protected routing and explicit public exemptions
 	bearerMiddleware, err := httpauth.NewBearerMiddleware(
@@ -80,6 +88,10 @@ func main() {
 	// User routes
 	mux.HandleFunc("POST /v1/users", userHandler.CreateUser)
 	mux.HandleFunc("GET /v1/users/{id}", userHandler.GetUser)
+
+	// Tenant routes
+	mux.HandleFunc("GET /v1/tenants/{id}", tenantHandler.GetTenant)
+	mux.HandleFunc("PATCH /v1/tenants/{id}", tenantHandler.UpdateTenant)
 
 	// Auth routes
 	mux.HandleFunc("POST /v1/auth/login", authHandler.Login)

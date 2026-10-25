@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/nooman57554/The_Orb/orb_libs/httpx"
 	"github.com/nooman57554/The_Orb/orb_libs/identity"
 	"github.com/nooman57554/The_Orb/orb_libs/identity/httpauth"
 	"github.com/nooman57554/The_Orb/orb_libs/identity/jwtverify"
@@ -118,9 +120,61 @@ func (m *mockSessionChecker) IsActive(ctx context.Context, sessionID uuid.UUID) 
 	return m.activeSessions[sessionID], nil
 }
 
+type mockAuthzRepository struct {
+	platformPerms map[uuid.UUID]map[string]bool
+	tenantPerms   map[uuid.UUID]map[uuid.UUID]map[string]bool
+	forceError    bool
+}
+
+func newMockAuthzRepository() *mockAuthzRepository {
+	return &mockAuthzRepository{
+		platformPerms: make(map[uuid.UUID]map[string]bool),
+		tenantPerms:   make(map[uuid.UUID]map[uuid.UUID]map[string]bool),
+	}
+}
+
+func (m *mockAuthzRepository) grantPlatform(userID uuid.UUID, permission string) {
+	if m.platformPerms[userID] == nil {
+		m.platformPerms[userID] = make(map[string]bool)
+	}
+	m.platformPerms[userID][permission] = true
+}
+
+func (m *mockAuthzRepository) grantTenant(userID, tenantID uuid.UUID, permission string) {
+	if m.tenantPerms[userID] == nil {
+		m.tenantPerms[userID] = make(map[uuid.UUID]map[string]bool)
+	}
+	if m.tenantPerms[userID][tenantID] == nil {
+		m.tenantPerms[userID][tenantID] = make(map[string]bool)
+	}
+	m.tenantPerms[userID][tenantID][permission] = true
+}
+
+func (m *mockAuthzRepository) HasPlatformPermission(ctx context.Context, userID uuid.UUID, permission string) (bool, error) {
+	if m.forceError {
+		return false, errors.New("database connection refused: i/o timeout")
+	}
+	if m.platformPerms[userID] != nil && m.platformPerms[userID][permission] {
+		return true, nil
+	}
+	return false, nil
+}
+
+func (m *mockAuthzRepository) HasTenantPermission(ctx context.Context, userID, tenantID uuid.UUID, permission string) (bool, error) {
+	if m.forceError {
+		return false, errors.New("database connection refused: i/o timeout")
+	}
+	if m.tenantPerms[userID] != nil && m.tenantPerms[userID][tenantID] != nil && m.tenantPerms[userID][tenantID][permission] {
+		return true, nil
+	}
+	return false, nil
+}
+
 type handlerFixture struct {
 	userRepo         *mockUserRepository
+	authzRepo        *mockAuthzRepository
 	userService      *service.UserService
+	authzService     *service.AuthorizationService
 	userHandler      *handler.UserHandler
 	jwtManager       *auth.JWTManager
 	sessionChecker   *mockSessionChecker
@@ -131,8 +185,13 @@ func setupHandlerFixture(t *testing.T) *handlerFixture {
 	t.Helper()
 
 	userRepo := newMockUserRepository()
+	authzRepo := newMockAuthzRepository()
 	userService := service.NewUserService(userRepo)
-	userHandler := handler.NewUserHandler(userService)
+	authzService, err := service.NewAuthorizationService(authzRepo)
+	if err != nil {
+		t.Fatalf("create authorization service: %v", err)
+	}
+	userHandler := handler.NewUserHandler(userService, authzService)
 
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -173,7 +232,9 @@ func setupHandlerFixture(t *testing.T) *handlerFixture {
 
 	return &handlerFixture{
 		userRepo:         userRepo,
+		authzRepo:        authzRepo,
 		userService:      userService,
+		authzService:     authzService,
 		userHandler:      userHandler,
 		jwtManager:       jwtManager,
 		sessionChecker:   sessionChecker,
@@ -406,6 +467,116 @@ func TestUserHandler_GetUser_SpoofedHeaderIgnored(t *testing.T) {
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("expected status %d, got %d. Header spoofing was not blocked!", http.StatusForbidden, rec.Code)
+	}
+}
+
+func TestUserHandler_GetUser_PlatformAdmin_OtherUserLookup_Success(t *testing.T) {
+	f := setupHandlerFixture(t)
+
+	admin := &model.User{ID: uuid.New(), Email: "admin@example.com", Status: "active"}
+	victim := &model.User{ID: uuid.New(), Email: "victim@example.com", Status: "active"}
+	_ = f.userRepo.Create(context.Background(), admin)
+	_ = f.userRepo.Create(context.Background(), victim)
+
+	// Grant platform-scoped user.read to admin
+	f.authzRepo.grantPlatform(admin.ID, "user.read")
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/users/"+victim.ID.String(), nil)
+	req.SetPathValue("id", victim.ID.String())
+
+	principal := &identity.Principal{
+		UserID:    admin.ID,
+		SessionID: uuid.New(),
+		TokenID:   uuid.New(),
+	}
+	ctx := identity.WithPrincipal(req.Context(), principal)
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	f.userHandler.GetUser(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for platform admin reading another user, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		ID    string `json:"id"`
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.ID != victim.ID.String() {
+		t.Errorf("expected victim ID %s, got %s", victim.ID.String(), resp.ID)
+	}
+}
+
+func TestUserHandler_GetUser_TenantAdmin_OtherUserLookup_Forbidden(t *testing.T) {
+	f := setupHandlerFixture(t)
+
+	tenantAdmin := &model.User{ID: uuid.New(), Email: "tadmin@example.com", Status: "active"}
+	otherUser := &model.User{ID: uuid.New(), Email: "other@example.com", Status: "active"}
+	_ = f.userRepo.Create(context.Background(), tenantAdmin)
+	_ = f.userRepo.Create(context.Background(), otherUser)
+
+	// Grant tenant-scoped user.read to tenantAdmin in tenant1
+	tenant1 := uuid.New()
+	f.authzRepo.grantTenant(tenantAdmin.ID, tenant1, "user.read")
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/users/"+otherUser.ID.String(), nil)
+	req.SetPathValue("id", otherUser.ID.String())
+
+	principal := &identity.Principal{
+		UserID:    tenantAdmin.ID,
+		SessionID: uuid.New(),
+		TokenID:   uuid.New(),
+	}
+	ctx := identity.WithPrincipal(req.Context(), principal)
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	f.userHandler.GetUser(rec, req)
+
+	// CRITICAL RULE: Tenant-scoped user.read must NOT grant platform-wide user lookup!
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden: tenant-scoped user.read must not authorize platform-wide user lookup, got %d", rec.Code)
+	}
+}
+
+func TestUserHandler_GetUser_AuthzDBError_Returns500(t *testing.T) {
+	f := setupHandlerFixture(t)
+
+	caller := &model.User{ID: uuid.New(), Email: "caller@example.com", Status: "active"}
+	target := &model.User{ID: uuid.New(), Email: "target@example.com", Status: "active"}
+	_ = f.userRepo.Create(context.Background(), caller)
+	_ = f.userRepo.Create(context.Background(), target)
+
+	f.authzRepo.forceError = true
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/users/"+target.ID.String(), nil)
+	req.SetPathValue("id", target.ID.String())
+
+	principal := &identity.Principal{
+		UserID:    caller.ID,
+		SessionID: uuid.New(),
+		TokenID:   uuid.New(),
+	}
+	ctx := identity.WithPrincipal(req.Context(), principal)
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	f.userHandler.GetUser(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 Internal Server Error on database error, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var prob httpx.ProblemDetails
+	if err := json.NewDecoder(rec.Body).Decode(&prob); err != nil {
+		t.Fatalf("failed to decode problem: %v", err)
+	}
+	if prob.Detail == "database connection refused: i/o timeout" {
+		t.Error("internal database error message leaked to client")
 	}
 }
 

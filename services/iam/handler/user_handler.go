@@ -16,12 +16,17 @@ import (
 )
 
 type UserHandler struct {
-	userService *service.UserService
+	userService  *service.UserService
+	authzService *service.AuthorizationService
 }
 
-func NewUserHandler(userService *service.UserService) *UserHandler {
+func NewUserHandler(
+	userService *service.UserService,
+	authzService *service.AuthorizationService,
+) *UserHandler {
 	return &UserHandler{
-		userService: userService,
+		userService:  userService,
+		authzService: authzService,
 	}
 }
 
@@ -162,12 +167,30 @@ func (h *UserHandler) GetUser(
 		return
 	}
 
-	if principal.UserID != userID {
+	if err := h.authzService.AuthorizeUserRead(r.Context(), principal, userID); err != nil {
+		if errors.Is(err, service.ErrUnauthorized) {
+			httpx.WriteProblem(
+				w,
+				http.StatusUnauthorized,
+				"Unauthorized",
+				"Authentication is required.",
+			)
+			return
+		}
+		if errors.Is(err, service.ErrForbidden) {
+			httpx.WriteProblem(
+				w,
+				http.StatusForbidden,
+				"Forbidden",
+				"You are not authorized to access this resource.",
+			)
+			return
+		}
 		httpx.WriteProblem(
 			w,
-			http.StatusForbidden,
-			"Forbidden",
-			"You are not authorized to access this resource.",
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			"An unexpected error occurred.",
 		)
 		return
 	}
