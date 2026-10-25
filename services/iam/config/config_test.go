@@ -388,22 +388,22 @@ func TestLoad_UnusableKeyPaths(t *testing.T) {
 
 func TestRedactDatabaseURL(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
-		password string
-		expected string
+		name      string
+		input     string
+		passwords []string
+		expected  string
 	}{
 		{
-			name:     "url with password",
-			input:    "postgres://admin:super_secret_password@10.0.0.1:5432/mydb?sslmode=disable",
-			password: "super_secret_password",
-			expected: "postgres://admin:REDACTED@10.0.0.1:5432/mydb?sslmode=disable",
+			name:      "url with password",
+			input:     "postgres://admin:super_secret_password@10.0.0.1:5432/mydb?sslmode=disable",
+			passwords: []string{"super_secret_password"},
+			expected:  "postgres://admin:REDACTED@10.0.0.1:5432/mydb?sslmode=disable",
 		},
 		{
-			name:     "postgresql url with password",
-			input:    "postgresql://app_user:another_secret_pass@localhost:5432/orb",
-			password: "another_secret_pass",
-			expected: "postgresql://app_user:REDACTED@localhost:5432/orb",
+			name:      "postgresql url with password",
+			input:     "postgresql://app_user:another_secret_pass@localhost:5432/orb",
+			passwords: []string{"another_secret_pass"},
+			expected:  "postgresql://app_user:REDACTED@localhost:5432/orb",
 		},
 		{
 			name:     "url without password",
@@ -426,40 +426,94 @@ func TestRedactDatabaseURL(t *testing.T) {
 			expected: "",
 		},
 		{
-			name:     "malformed url with postgres scheme",
-			input:    "postgres://admin:secret@[::1:invalid/mydb",
-			password: "secret",
-			expected: "[redacted-database-url]",
+			name:      "malformed url with postgres scheme",
+			input:     "postgres://admin:secret@[::1:invalid/mydb",
+			passwords: []string{"secret"},
+			expected:  "[redacted-database-url]",
 		},
 		{
-			name:     "dsn unquoted password",
-			input:    "host=localhost port=5432 user=orb password=super_secret_password dbname=orb_control sslmode=disable",
-			password: "super_secret_password",
-			expected: "host=localhost port=5432 user=orb password=REDACTED dbname=orb_control sslmode=disable",
+			name:      "url with query password only",
+			input:     "postgres://localhost:5432/mydb?password=query_secret_password",
+			passwords: []string{"query_secret_password"},
+			expected:  "postgres://localhost:5432/mydb?password=REDACTED",
 		},
 		{
-			name:     "dsn single quoted password with spaces",
-			input:    "host=localhost port=5432 user=orb password='secret with spaces' dbname=orb_control",
-			password: "secret with spaces",
-			expected: "host=localhost port=5432 user=orb password=REDACTED dbname=orb_control",
+			name:      "postgresql url with query password and other parameters",
+			input:     "postgresql://localhost:5432/mydb?sslmode=disable&password=query_secret_password",
+			passwords: []string{"query_secret_password"},
+			expected:  "postgresql://localhost:5432/mydb?password=REDACTED&sslmode=disable",
 		},
 		{
-			name:     "dsn single quoted password with escaped quote",
-			input:    `host=localhost port=5432 user=orb password='sec\'ret' dbname=orb_control`,
-			password: "sec'ret",
-			expected: "host=localhost port=5432 user=orb password=REDACTED dbname=orb_control",
+			name:      "url with mixed credentials (userinfo password and query password)",
+			input:     "postgres://app_user:userinfo_secret@localhost:5432/mydb?password=query_secret&sslmode=disable",
+			passwords: []string{"userinfo_secret", "query_secret"},
+			expected:  "postgres://app_user:REDACTED@localhost:5432/mydb?password=REDACTED&sslmode=disable",
 		},
 		{
-			name:     "dsn double quoted password",
-			input:    `host=localhost port=5432 user=orb password="double_secret_pass" dbname=orb_control`,
-			password: "double_secret_pass",
-			expected: "host=localhost port=5432 user=orb password=REDACTED dbname=orb_control",
+			name:      "url with mixed credentials and same password",
+			input:     "postgres://app_user:shared_secret@localhost:5432/mydb?password=shared_secret",
+			passwords: []string{"shared_secret"},
+			expected:  "postgres://app_user:REDACTED@localhost:5432/mydb?password=REDACTED",
 		},
 		{
-			name:     "dsn spaces around equals",
-			input:    "host=localhost port=5432 user=orb password = 'spaced_pass' dbname=orb_control",
-			password: "spaced_pass",
-			expected: "host=localhost port=5432 user=orb password = REDACTED dbname=orb_control",
+			name:      "url with uppercase query parameter name",
+			input:     "postgres://app_user:userinfo_secret@localhost:5432/mydb?PASSWORD=query_secret",
+			passwords: []string{"userinfo_secret", "query_secret"},
+			expected:  "postgres://app_user:REDACTED@localhost:5432/mydb?password=REDACTED",
+		},
+		{
+			name:      "url with query sslpassword",
+			input:     "postgres://localhost:5432/mydb?sslpassword=cert_secret_pass",
+			passwords: []string{"cert_secret_pass"},
+			expected:  "postgres://localhost:5432/mydb?sslpassword=REDACTED",
+		},
+		{
+			name:      "url with query password containing encoded characters",
+			input:     "postgres://localhost:5432/mydb?password=secret%20with%20spaces",
+			passwords: []string{"secret with spaces", "secret%20with%20spaces"},
+			expected:  "postgres://localhost:5432/mydb?password=REDACTED",
+		},
+		{
+			name:      "url with malformed query parameters",
+			input:     "postgres://localhost:5432/mydb?password=secret%ZZ",
+			passwords: []string{"secret"},
+			expected:  "[redacted-database-url]",
+		},
+		{
+			name:      "url with query password matching username falls back to placeholder",
+			input:     "postgres://secret:user_secret@localhost:5432/mydb?password=secret",
+			passwords: []string{"secret", "user_secret"},
+			expected:  "[redacted-database-url]",
+		},
+		{
+			name:      "dsn unquoted password",
+			input:     "host=localhost port=5432 user=orb password=super_secret_password dbname=orb_control sslmode=disable",
+			passwords: []string{"super_secret_password"},
+			expected:  "host=localhost port=5432 user=orb password=REDACTED dbname=orb_control sslmode=disable",
+		},
+		{
+			name:      "dsn single quoted password with spaces",
+			input:     "host=localhost port=5432 user=orb password='secret with spaces' dbname=orb_control",
+			passwords: []string{"secret with spaces"},
+			expected:  "host=localhost port=5432 user=orb password=REDACTED dbname=orb_control",
+		},
+		{
+			name:      "dsn single quoted password with escaped quote",
+			input:     `host=localhost port=5432 user=orb password='sec\'ret' dbname=orb_control`,
+			passwords: []string{"sec'ret"},
+			expected:  "host=localhost port=5432 user=orb password=REDACTED dbname=orb_control",
+		},
+		{
+			name:      "dsn double quoted password",
+			input:     `host=localhost port=5432 user=orb password="double_secret_pass" dbname=orb_control`,
+			passwords: []string{"double_secret_pass"},
+			expected:  "host=localhost port=5432 user=orb password=REDACTED dbname=orb_control",
+		},
+		{
+			name:      "dsn spaces around equals",
+			input:     "host=localhost port=5432 user=orb password = 'spaced_pass' dbname=orb_control",
+			passwords: []string{"spaced_pass"},
+			expected:  "host=localhost port=5432 user=orb password = REDACTED dbname=orb_control",
 		},
 		{
 			name:     "dsn without password",
@@ -472,10 +526,10 @@ func TestRedactDatabaseURL(t *testing.T) {
 			expected: "host=localhost port=5432 user=orb password=REDACTED dbname=orb_control",
 		},
 		{
-			name:     "dsn password matches other attribute value",
-			input:    "host=localhost user=secret password=secret dbname=orb_control",
-			password: "secret",
-			expected: "[redacted-database-dsn]",
+			name:      "dsn password matches other attribute value",
+			input:     "host=localhost user=secret password=secret dbname=orb_control",
+			passwords: []string{"secret"},
+			expected:  "[redacted-database-dsn]",
 		},
 		{
 			name:     "dsn invalid format",
@@ -490,8 +544,10 @@ func TestRedactDatabaseURL(t *testing.T) {
 			if got != tt.expected {
 				t.Errorf("RedactDatabaseURL(%q) = %q, want %q", tt.input, got, tt.expected)
 			}
-			if tt.password != "" && strings.Contains(got, tt.password) {
-				t.Errorf("Redacted URL leaked password %q: %s", tt.password, got)
+			for _, p := range tt.passwords {
+				if p != "" && strings.Contains(got, p) {
+					t.Errorf("Redacted URL leaked password %q: %s", p, got)
+				}
 			}
 		})
 	}

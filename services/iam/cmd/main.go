@@ -93,8 +93,7 @@ func main() {
 		IdleTimeout:  cfg.HTTPIdleTimeout,
 	}
 
-	log.Println("IAM initialized")
-	log.Printf("IAM server listening on %s", cfg.HTTPAddr)
+	log.Printf("IAM server starting on %s", cfg.HTTPAddr)
 
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("IAM server failed: %v", err)

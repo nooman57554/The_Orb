@@ -62,7 +62,7 @@ func (c Config) RedactedDatabaseURL() string {
 	return RedactDatabaseURL(c.DatabaseURL)
 }
 
-var dsnPasswordRegex = regexp.MustCompile(`(?i)\b(password\s*=\s*)(?:'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|\S+)`)
+var dsnPasswordRegex = regexp.MustCompile(`(?i)\b((?:ssl)?password\s*=\s*)(?:'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|\S+)`)
 
 // RedactDatabaseURL masks the password in a connection string (URL or keyword/value DSN), safe for logging.
 func RedactDatabaseURL(rawURL string) string {
@@ -78,12 +78,77 @@ func RedactDatabaseURL(rawURL string) string {
 		if err != nil {
 			return "[redacted-database-url]"
 		}
+
+		var rawPasswords []string
+
+		// Redact user-info password if present
 		if u.User != nil {
-			if _, hasPass := u.User.Password(); hasPass {
+			if pass, hasPass := u.User.Password(); hasPass {
+				if pass != "" {
+					rawPasswords = append(rawPasswords, pass)
+				}
 				u.User = url.UserPassword(u.User.Username(), "REDACTED")
 			}
 		}
-		return u.String()
+
+		// Redact query parameter passwords (password and sslpassword)
+		if u.RawQuery != "" {
+			values, err := url.ParseQuery(u.RawQuery)
+			if err != nil {
+				// Malformed query string: safe redaction cannot be guaranteed
+				return "[redacted-database-url]"
+			}
+
+			hasPasswordParam := false
+			hasSSLPasswordParam := false
+			for k, vals := range values {
+				if strings.EqualFold(k, "password") {
+					hasPasswordParam = true
+					for _, v := range vals {
+						if v != "" {
+							rawPasswords = append(rawPasswords, v)
+						}
+					}
+					values.Del(k)
+				} else if strings.EqualFold(k, "sslpassword") {
+					hasSSLPasswordParam = true
+					for _, v := range vals {
+						if v != "" {
+							rawPasswords = append(rawPasswords, v)
+						}
+					}
+					values.Del(k)
+				}
+			}
+
+			if hasPasswordParam {
+				values.Set("password", "REDACTED")
+			}
+			if hasSSLPasswordParam {
+				values.Set("sslpassword", "REDACTED")
+			}
+			if hasPasswordParam || hasSSLPasswordParam {
+				u.RawQuery = values.Encode()
+			}
+		}
+
+		redacted := u.String()
+
+		// Ensure no extracted passwords appear in the output
+		for _, pass := range rawPasswords {
+			if strings.Contains(redacted, pass) {
+				return "[redacted-database-url]"
+			}
+		}
+
+		// Verify against pgxpool.ParseConfig if parseable
+		if parsedCfg, parseErr := pgxpool.ParseConfig(trimmed); parseErr == nil && parsedCfg != nil {
+			if parsedCfg.ConnConfig.Password != "" && strings.Contains(redacted, parsedCfg.ConnConfig.Password) {
+				return "[redacted-database-url]"
+			}
+		}
+
+		return redacted
 	}
 
 	// 2. Keyword/value DSN format (e.g. host=localhost port=5432 user=orb password=secret dbname=orb_control)
