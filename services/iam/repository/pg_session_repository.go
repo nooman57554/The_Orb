@@ -66,9 +66,12 @@ func (r *PostgresSessionRepository) GetByRefreshTokenHash(
 	ctx context.Context,
 	tokenHash string,
 ) (*model.Session, error) {
+	if tokenHash == "" {
+		return nil, ErrNotFound
+	}
 
 	const query = `
-		SELECT id, user_id, expires_at, created_at, revoked_at
+		SELECT id, user_id, expires_at, created_at, revoked_at, rotated_at
 		FROM sessions
 		WHERE token_hash = $1
 		  AND revoked_at IS NULL
@@ -83,12 +86,47 @@ func (r *PostgresSessionRepository) GetByRefreshTokenHash(
 		&session.ExpiresAt,
 		&session.CreatedAt,
 		&session.RevokedAt,
+		&session.RotatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, fmt.Errorf("get session by refresh token hash: %w", err)
+	}
+
+	return &session, nil
+}
+
+func (r *PostgresSessionRepository) GetByPreviousTokenHash(
+	ctx context.Context,
+	tokenHash string,
+) (*model.Session, error) {
+	if tokenHash == "" {
+		return nil, ErrNotFound
+	}
+
+	const query = `
+		SELECT id, user_id, expires_at, created_at, revoked_at, rotated_at
+		FROM sessions
+		WHERE previous_token_hash = $1
+	`
+
+	var session model.Session
+
+	err := r.db.Pool().QueryRow(ctx, query, tokenHash).Scan(
+		&session.ID,
+		&session.UserID,
+		&session.ExpiresAt,
+		&session.CreatedAt,
+		&session.RevokedAt,
+		&session.RotatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("get session by previous refresh token hash: %w", err)
 	}
 
 	return &session, nil
@@ -108,11 +146,13 @@ func (r *PostgresSessionRepository) RotateRefreshToken(
 
 	const query = `
 		UPDATE sessions
-		SET token_hash = $2
+		SET previous_token_hash = token_hash,
+		    token_hash = $2,
+		    rotated_at = NOW()
 		WHERE token_hash = $1
 		  AND revoked_at IS NULL
 		  AND expires_at > NOW()
-		RETURNING id, user_id, expires_at, created_at, revoked_at
+		RETURNING id, user_id, expires_at, created_at, revoked_at, rotated_at
 	`
 
 	var session model.Session
@@ -128,6 +168,7 @@ func (r *PostgresSessionRepository) RotateRefreshToken(
 		&session.ExpiresAt,
 		&session.CreatedAt,
 		&session.RevokedAt,
+		&session.RotatedAt,
 	)
 
 	if err != nil {

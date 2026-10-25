@@ -9,12 +9,14 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/nooman57554/The_Orb/orb_libs/httpx"
 	"github.com/nooman57554/The_Orb/orb_libs/identity/httpauth"
 	"github.com/nooman57554/The_Orb/orb_libs/identity/jwtverify"
 	"github.com/nooman57554/The_Orb/services/iam/auth"
@@ -28,14 +30,17 @@ type mockSessionRepository struct {
 	mu                  sync.RWMutex
 	sessionsByID        map[uuid.UUID]*model.Session
 	sessionsByTokenHash map[string]*model.Session
+	sessionsByPrevHash  map[string]*model.Session
 	userRepo            repository.UserRepository
 	forceRevokeError    bool
+	forceGetError       bool
 }
 
 func newMockSessionRepository(userRepo repository.UserRepository) *mockSessionRepository {
 	return &mockSessionRepository{
 		sessionsByID:        make(map[uuid.UUID]*model.Session),
 		sessionsByTokenHash: make(map[string]*model.Session),
+		sessionsByPrevHash:  make(map[string]*model.Session),
 		userRepo:            userRepo,
 	}
 }
@@ -54,11 +59,31 @@ func (m *mockSessionRepository) GetByRefreshTokenHash(ctx context.Context, token
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	if m.forceGetError {
+		return nil, errors.New("database connection failure")
+	}
+
 	s, ok := m.sessionsByTokenHash[tokenHash]
 	if !ok {
 		return nil, repository.ErrNotFound
 	}
 	if s.RevokedAt != nil || time.Now().After(s.ExpiresAt) {
+		return nil, repository.ErrNotFound
+	}
+	copy := *s
+	return &copy, nil
+}
+
+func (m *mockSessionRepository) GetByPreviousTokenHash(ctx context.Context, tokenHash string) (*model.Session, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.forceGetError {
+		return nil, errors.New("database connection failure")
+	}
+
+	s, ok := m.sessionsByPrevHash[tokenHash]
+	if !ok {
 		return nil, repository.ErrNotFound
 	}
 	copy := *s
@@ -75,7 +100,12 @@ func (m *mockSessionRepository) RotateRefreshToken(ctx context.Context, oldToken
 	}
 
 	delete(m.sessionsByTokenHash, oldTokenHash)
+	m.sessionsByPrevHash[oldTokenHash] = s
 	m.sessionsByTokenHash[newTokenHash] = s
+	now := time.Now()
+	s.RotatedAt = &now
+	prevHash := oldTokenHash
+	s.PreviousTokenHash = &prevHash
 	copy := *s
 	return &copy, nil
 }
@@ -730,5 +760,339 @@ func TestAuthHandler_Logout_BodyCannotRedirectRevocationToAnotherSession(t *test
 	f.sessionRepo.mu.RUnlock()
 	if sessionBRecord.RevokedAt != nil {
 		t.Errorf("Session B RevokedAt should be nil, but got %v", sessionBRecord.RevokedAt)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Milestone 2B Tests: Refresh-Token Reuse Detection & Concurrency
+// -----------------------------------------------------------------------------
+
+func TestAuthHandler_Refresh_SuccessAndRotation(t *testing.T) {
+	f := setupAuthFixture(t)
+	userService := service.NewUserService(f.userRepo)
+	_, _ = userService.CreateUser(context.Background(), service.CreateUserInput{
+		Email:    "refresh_user@example.com",
+		Password: "Password123!",
+	})
+
+	tokens1, err := f.authService.Login(context.Background(), service.LoginInput{
+		Email:    "refresh_user@example.com",
+		Password: "Password123!",
+	})
+	if err != nil {
+		t.Fatalf("login failed: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]string{
+		"refresh_token": tokens1.RefreshToken,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/auth/refresh", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	f.appHandler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var tokens2 struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		TokenType    string `json:"token_type"`
+		ExpiresIn    int64  `json:"expires_in"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&tokens2); err != nil {
+		t.Fatalf("decode refresh response: %v", err)
+	}
+
+	if tokens2.RefreshToken == "" || tokens2.RefreshToken == tokens1.RefreshToken {
+		t.Errorf("expected new distinct refresh token, got %q", tokens2.RefreshToken)
+	}
+	if tokens2.AccessToken == "" {
+		t.Error("expected non-empty access token")
+	}
+
+	// Verify session in repository has been rotated
+	f.sessionRepo.mu.RLock()
+	var rotatedSession *model.Session
+	for _, s := range f.sessionRepo.sessionsByID {
+		rotatedSession = s
+		break
+	}
+	f.sessionRepo.mu.RUnlock()
+
+	if rotatedSession == nil {
+		t.Fatal("session not found in repository")
+	}
+	if rotatedSession.PreviousTokenHash == nil {
+		t.Error("expected PreviousTokenHash to be populated after rotation")
+	}
+	if rotatedSession.RotatedAt == nil {
+		t.Error("expected RotatedAt timestamp to be populated after rotation")
+	}
+}
+
+func TestAuthHandler_Refresh_InvalidAndExpiredTokens(t *testing.T) {
+	f := setupAuthFixture(t)
+	userService := service.NewUserService(f.userRepo)
+	_, _ = userService.CreateUser(context.Background(), service.CreateUserInput{
+		Email:    "user_expire@example.com",
+		Password: "Password123!",
+	})
+
+	// 1. Empty refresh token -> 400 Bad Request
+	{
+		body, _ := json.Marshal(map[string]string{
+			"refresh_token": "",
+		})
+		req := httptest.NewRequest(http.MethodPost, "/v1/auth/refresh", bytes.NewReader(body))
+		rec := httptest.NewRecorder()
+		f.appHandler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("expected 400 Bad Request for empty refresh token, got %d", rec.Code)
+		}
+	}
+
+	// 2. Random unknown refresh token -> 401 Unauthorized
+	{
+		body, _ := json.Marshal(map[string]string{
+			"refresh_token": "non_existent_random_token_12345",
+		})
+		req := httptest.NewRequest(http.MethodPost, "/v1/auth/refresh", bytes.NewReader(body))
+		rec := httptest.NewRecorder()
+		f.appHandler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("expected 401 Unauthorized for unknown token, got %d", rec.Code)
+		}
+	}
+
+	// 3. Expired refresh token -> 401 Unauthorized
+	{
+		tokens, _ := f.authService.Login(context.Background(), service.LoginInput{
+			Email:    "user_expire@example.com",
+			Password: "Password123!",
+		})
+
+		// Artificially expire the session in the repository
+		f.sessionRepo.mu.Lock()
+		for _, s := range f.sessionRepo.sessionsByID {
+			s.ExpiresAt = time.Now().Add(-1 * time.Hour)
+		}
+		f.sessionRepo.mu.Unlock()
+
+		body, _ := json.Marshal(map[string]string{
+			"refresh_token": tokens.RefreshToken,
+		})
+		req := httptest.NewRequest(http.MethodPost, "/v1/auth/refresh", bytes.NewReader(body))
+		rec := httptest.NewRecorder()
+		f.appHandler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("expected 401 Unauthorized for expired refresh token, got %d", rec.Code)
+		}
+	}
+}
+
+func TestAuthHandler_Refresh_ReuseOfPreviouslyRotatedToken_RevokesSession(t *testing.T) {
+	f := setupAuthFixture(t)
+	// Disable grace period to simulate reuse outside grace window
+	f.authService.SetReuseGracePeriod(0)
+
+	userService := service.NewUserService(f.userRepo)
+	_, _ = userService.CreateUser(context.Background(), service.CreateUserInput{
+		Email:    "reuse_victim@example.com",
+		Password: "Password123!",
+	})
+
+	tokens1, err := f.authService.Login(context.Background(), service.LoginInput{
+		Email:    "reuse_victim@example.com",
+		Password: "Password123!",
+	})
+	if err != nil {
+		t.Fatalf("login failed: %v", err)
+	}
+
+	// 1. Legitimate user rotates RT1 -> RT2
+	body1, _ := json.Marshal(map[string]string{"refresh_token": tokens1.RefreshToken})
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/auth/refresh", bytes.NewReader(body1))
+	rec1 := httptest.NewRecorder()
+	f.appHandler.ServeHTTP(rec1, req1)
+
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first refresh failed: %d: %s", rec1.Code, rec1.Body.String())
+	}
+
+	var tokens2 struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	_ = json.NewDecoder(rec1.Body).Decode(&tokens2)
+
+	// 2. Attacker replays RT1 (previously rotated token)
+	bodyReplay, _ := json.Marshal(map[string]string{"refresh_token": tokens1.RefreshToken})
+	reqReplay := httptest.NewRequest(http.MethodPost, "/v1/auth/refresh", bytes.NewReader(bodyReplay))
+	recReplay := httptest.NewRecorder()
+	f.appHandler.ServeHTTP(recReplay, reqReplay)
+
+	if recReplay.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized on reuse, got %d", recReplay.Code)
+	}
+
+	// 3. Security response check: The entire session must now be REVOKED
+	var sessionID uuid.UUID
+	f.sessionRepo.mu.RLock()
+	for id, s := range f.sessionRepo.sessionsByID {
+		sessionID = id
+		if s.RevokedAt == nil {
+			t.Errorf("session %s should be revoked after token reuse, but RevokedAt is nil", id)
+		}
+	}
+	f.sessionRepo.mu.RUnlock()
+
+	active, _ := f.sessionRepo.IsActive(context.Background(), sessionID)
+	if active {
+		t.Errorf("session should be inactive after token reuse")
+	}
+
+	// 4. Legitimate user holding RT2 now attempts to refresh -> rejected because session is revoked!
+	body2, _ := json.Marshal(map[string]string{"refresh_token": tokens2.RefreshToken})
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/auth/refresh", bytes.NewReader(body2))
+	rec2 := httptest.NewRecorder()
+	f.appHandler.ServeHTTP(rec2, req2)
+
+	if rec2.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 Unauthorized for RT2 after session revoked by reuse, got %d", rec2.Code)
+	}
+}
+
+func TestAuthHandler_Refresh_ConcurrentRefresh_OneWins_LosingDoesNotRevoke(t *testing.T) {
+	f := setupAuthFixture(t)
+	// Set 15s grace period for in-flight races
+	f.authService.SetReuseGracePeriod(15 * time.Second)
+
+	userService := service.NewUserService(f.userRepo)
+	_, _ = userService.CreateUser(context.Background(), service.CreateUserInput{
+		Email:    "concurrent_user@example.com",
+		Password: "Password123!",
+	})
+
+	tokens, err := f.authService.Login(context.Background(), service.LoginInput{
+		Email:    "concurrent_user@example.com",
+		Password: "Password123!",
+	})
+	if err != nil {
+		t.Fatalf("login failed: %v", err)
+	}
+
+	const concurrency = 2
+	results := make(chan int, concurrency)
+	var wg sync.WaitGroup
+
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			body, _ := json.Marshal(map[string]string{
+				"refresh_token": tokens.RefreshToken,
+			})
+			req := httptest.NewRequest(http.MethodPost, "/v1/auth/refresh", bytes.NewReader(body))
+			rec := httptest.NewRecorder()
+			f.appHandler.ServeHTTP(rec, req)
+			results <- rec.Code
+		}()
+	}
+
+	wg.Wait()
+	close(results)
+
+	var successCount, failureCount int
+	for code := range results {
+		if code == http.StatusOK {
+			successCount++
+		} else if code == http.StatusUnauthorized {
+			failureCount++
+		} else {
+			t.Errorf("unexpected status code %d in concurrent refresh", code)
+		}
+	}
+
+	if successCount != 1 {
+		t.Errorf("expected exactly 1 winner, got %d", successCount)
+	}
+	if failureCount != 1 {
+		t.Errorf("expected exactly 1 losing request (401), got %d", failureCount)
+	}
+
+	// CRITICAL: The session must NOT be revoked! In-flight concurrent race within grace period is benign.
+	f.sessionRepo.mu.RLock()
+	var session *model.Session
+	for _, s := range f.sessionRepo.sessionsByID {
+		session = s
+		break
+	}
+	f.sessionRepo.mu.RUnlock()
+
+	if session == nil || session.RevokedAt != nil {
+		t.Fatalf("session was improperly revoked by concurrent race! RevokedAt = %v", session.RevokedAt)
+	}
+
+	active, _ := f.sessionRepo.IsActive(context.Background(), session.ID)
+	if !active {
+		t.Error("winning session should still be active")
+	}
+}
+
+func TestAuthHandler_Refresh_DatabaseFailure_Returns500(t *testing.T) {
+	f := setupAuthFixture(t)
+	userService := service.NewUserService(f.userRepo)
+	_, _ = userService.CreateUser(context.Background(), service.CreateUserInput{
+		Email:    "db_fail_user@example.com",
+		Password: "Password123!",
+	})
+
+	tokens, _ := f.authService.Login(context.Background(), service.LoginInput{
+		Email:    "db_fail_user@example.com",
+		Password: "Password123!",
+	})
+
+	// Inject database connection failure
+	f.sessionRepo.forceGetError = true
+
+	body, _ := json.Marshal(map[string]string{
+		"refresh_token": tokens.RefreshToken,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/auth/refresh", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	f.appHandler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 Internal Server Error on database failure, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var prob httpx.ProblemDetails
+	if err := json.NewDecoder(rec.Body).Decode(&prob); err != nil {
+		t.Fatalf("failed to decode problem: %v", err)
+	}
+	if prob.Detail == "database connection failure" {
+		t.Error("internal database error message leaked to client")
+	}
+}
+
+func TestAuthHandler_Refresh_NoRawTokenInLogsOrResponse(t *testing.T) {
+	f := setupAuthFixture(t)
+	f.authService.SetReuseGracePeriod(0)
+
+	rawSecretToken := "super_secret_raw_refresh_token_xyz987"
+	body, _ := json.Marshal(map[string]string{
+		"refresh_token": rawSecretToken,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/auth/refresh", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	f.appHandler.ServeHTTP(rec, req)
+
+	responseBody := rec.Body.String()
+	if strings.Contains(responseBody, rawSecretToken) {
+		t.Errorf("raw secret refresh token was leaked in response body: %s", responseBody)
 	}
 }

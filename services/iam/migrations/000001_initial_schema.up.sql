@@ -210,15 +210,22 @@ CREATE TABLE sessions (
 
     token_hash TEXT NOT NULL UNIQUE,
 
+    previous_token_hash TEXT,
+
     expires_at TIMESTAMPTZ NOT NULL,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    revoked_at TIMESTAMPTZ
+    revoked_at TIMESTAMPTZ,
+
+    rotated_at TIMESTAMPTZ
 );
 
 CREATE INDEX idx_sessions_user_id ON sessions(user_id);
 CREATE INDEX idx_sessions_expires_at ON sessions(expires_at);
+CREATE INDEX idx_sessions_previous_token_hash
+    ON sessions(previous_token_hash)
+    WHERE previous_token_hash IS NOT NULL;
 
 
 -- ============================================================

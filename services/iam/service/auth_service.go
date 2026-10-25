@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -38,12 +39,15 @@ type TokenPair struct {
 	TokenType    string
 }
 
+const defaultReuseGracePeriod = 15 * time.Second
+
 type AuthService struct {
-	userRepo        repository.UserRepository
-	sessionRepo     repository.SessionRepository
-	jwtManager      *auth.JWTManager
-	accessTokenTTL  time.Duration
-	refreshTokenTTL time.Duration
+	userRepo         repository.UserRepository
+	sessionRepo      repository.SessionRepository
+	jwtManager       *auth.JWTManager
+	accessTokenTTL   time.Duration
+	refreshTokenTTL  time.Duration
+	reuseGracePeriod time.Duration
 }
 
 func NewAuthService(
@@ -61,12 +65,17 @@ func NewAuthService(
 	}
 
 	return &AuthService{
-		userRepo:        userRepo,
-		sessionRepo:     sessionRepo,
-		jwtManager:      jwtManager,
-		accessTokenTTL:  accessTokenTTL,
-		refreshTokenTTL: refreshTokenTTL,
+		userRepo:         userRepo,
+		sessionRepo:      sessionRepo,
+		jwtManager:       jwtManager,
+		accessTokenTTL:   accessTokenTTL,
+		refreshTokenTTL:  refreshTokenTTL,
+		reuseGracePeriod: defaultReuseGracePeriod,
 	}, nil
+}
+
+func (s *AuthService) SetReuseGracePeriod(d time.Duration) {
+	s.reuseGracePeriod = d
 }
 
 func (s *AuthService) Login(
@@ -143,10 +152,32 @@ func (s *AuthService) Refresh(
 
 	session, err := s.sessionRepo.GetByRefreshTokenHash(ctx, oldHash)
 	if err != nil {
-		if errors.Is(err, repository.ErrNotFound) {
+		if !errors.Is(err, repository.ErrNotFound) {
+			return nil, fmt.Errorf("get session by refresh token hash: %w", err)
+		}
+
+		// Token hash not found as a current active token.
+		// Check whether this token was previously rotated (reuse detection).
+		reuseSession, reuseErr := s.sessionRepo.GetByPreviousTokenHash(ctx, oldHash)
+		if reuseErr != nil {
+			if errors.Is(reuseErr, repository.ErrNotFound) {
+				return nil, ErrInvalidRefreshToken
+			}
+			return nil, fmt.Errorf("check token reuse: %w", reuseErr)
+		}
+
+		// Found as a previous token. Check if within grace period (concurrent race / network retry).
+		if reuseSession.RotatedAt != nil && s.reuseGracePeriod > 0 && time.Since(*reuseSession.RotatedAt) <= s.reuseGracePeriod {
 			return nil, ErrInvalidRefreshToken
 		}
-		return nil, fmt.Errorf("get session: %w", err)
+
+		// Replay attack / reuse outside grace window: revoke the compromised session.
+		if revokeErr := s.sessionRepo.Revoke(ctx, reuseSession.ID); revokeErr != nil {
+			return nil, fmt.Errorf("revoke session on token reuse: %w", revokeErr)
+		}
+		log.Printf("SECURITY: refresh token reuse detected for session %s; session revoked", reuseSession.ID)
+
+		return nil, ErrInvalidRefreshToken
 	}
 
 	user, err := s.userRepo.GetByID(ctx, session.UserID)
@@ -181,7 +212,18 @@ func (s *AuthService) Refresh(
 	)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
-			// Another request may have rotated it first.
+			// Another request rotated it first during this in-flight call.
+			// Verify if it is in previous_token_hash and check grace period.
+			reuseSession, reuseErr := s.sessionRepo.GetByPreviousTokenHash(ctx, oldHash)
+			if reuseErr == nil && reuseSession != nil {
+				if reuseSession.RotatedAt != nil && s.reuseGracePeriod > 0 && time.Since(*reuseSession.RotatedAt) <= s.reuseGracePeriod {
+					return nil, ErrInvalidRefreshToken
+				}
+				if revokeErr := s.sessionRepo.Revoke(ctx, reuseSession.ID); revokeErr != nil {
+					return nil, fmt.Errorf("revoke session on token reuse: %w", revokeErr)
+				}
+				log.Printf("SECURITY: refresh token reuse detected for session %s; session revoked", reuseSession.ID)
+			}
 			return nil, ErrInvalidRefreshToken
 		}
 		return nil, fmt.Errorf("rotate refresh token: %w", err)

@@ -2,6 +2,7 @@ package repository_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/google/uuid"
@@ -50,5 +51,13 @@ func TestPostgresSessionRepository_RotateRefreshToken_InvalidInputs(t *testing.T
 
 	if _, err := repo.RotateRefreshToken(context.Background(), "same", "same"); err == nil {
 		t.Fatal("expected error when old and new token hashes are identical")
+	}
+}
+
+func TestPostgresSessionRepository_GetByPreviousTokenHash_Empty(t *testing.T) {
+	repo := repository.NewPostgresSessionRepository(nil)
+	session, err := repo.GetByPreviousTokenHash(context.Background(), "")
+	if !errors.Is(err, repository.ErrNotFound) || session != nil {
+		t.Fatalf("expected ErrNotFound for empty token hash, got session=%v, err=%v", session, err)
 	}
 }

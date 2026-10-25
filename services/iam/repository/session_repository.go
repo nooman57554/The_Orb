@@ -13,6 +13,10 @@ type SessionRepository interface {
 		ctx context.Context,
 		tokenHash string,
 	) (*model.Session, error)
+	GetByPreviousTokenHash(
+		ctx context.Context,
+		tokenHash string,
+	) (*model.Session, error)
 	RotateRefreshToken(
 		ctx context.Context,
 		oldTokenHash string,
