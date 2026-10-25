@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/nooman57554/The_Orb/orb_libs/identity/httpauth"
 	"github.com/nooman57554/The_Orb/orb_libs/identity/jwtverify"
@@ -28,6 +29,7 @@ type mockSessionRepository struct {
 	sessionsByID        map[uuid.UUID]*model.Session
 	sessionsByTokenHash map[string]*model.Session
 	userRepo            repository.UserRepository
+	forceRevokeError    bool
 }
 
 func newMockSessionRepository(userRepo repository.UserRepository) *mockSessionRepository {
@@ -98,6 +100,10 @@ func (m *mockSessionRepository) Revoke(ctx context.Context, sessionID uuid.UUID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if m.forceRevokeError {
+		return errors.New("database connection refused: i/o timeout")
+	}
+
 	s, ok := m.sessionsByID[sessionID]
 	if !ok {
 		return repository.ErrNotFound
@@ -141,6 +147,28 @@ type authTestFixture struct {
 	jwtManager       *auth.JWTManager
 	bearerMiddleware *httpauth.BearerMiddleware
 	appHandler       http.Handler
+	privKey          ed25519.PrivateKey
+	keyID            string
+}
+
+func (f *authTestFixture) createExpiredToken(t *testing.T, userID, sessionID uuid.UUID) string {
+	t.Helper()
+	claims := jwt.MapClaims{
+		"iss": "orb-iam",
+		"sub": userID.String(),
+		"aud": []string{"orb-platform"},
+		"sid": sessionID.String(),
+		"jti": uuid.New().String(),
+		"exp": time.Now().Add(-5 * time.Minute).Unix(),
+		"iat": time.Now().Add(-20 * time.Minute).Unix(),
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
+	token.Header["kid"] = f.keyID
+	tokenString, err := token.SignedString(f.privKey)
+	if err != nil {
+		t.Fatalf("sign expired token: %v", err)
+	}
+	return tokenString
 }
 
 type mockUserRepositoryWithDBErrors struct {
@@ -228,6 +256,8 @@ func setupAuthFixture(t *testing.T) *authTestFixture {
 		jwtManager:       jwtManager,
 		bearerMiddleware: bearerMiddleware,
 		appHandler:       appHandler,
+		privKey:          priv,
+		keyID:            keyID,
 	}
 }
 
@@ -340,10 +370,55 @@ func TestAuthHandler_Login_TimingAndEnumerationDefense(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// Fix 2 Tests: Logout Race With Refresh, Idempotency, and Security
+// Strict Logout Tests
 // -----------------------------------------------------------------------------
 
-func TestAuthHandler_Logout_BearerToken_Success(t *testing.T) {
+func TestAuthHandler_Logout_MissingBearerToken_Returns401(t *testing.T) {
+	f := setupAuthFixture(t)
+
+	// Missing Bearer token returns 401
+	req := httptest.NewRequest(http.MethodPost, "/v1/auth/logout", nil)
+	rec := httptest.NewRecorder()
+	f.appHandler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized for missing bearer token, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAuthHandler_Logout_InvalidOrExpiredAccessToken_Returns401(t *testing.T) {
+	f := setupAuthFixture(t)
+
+	userID := uuid.New()
+	sessionID := uuid.New()
+
+	// 1. Invalid signature / malformed token
+	{
+		req := httptest.NewRequest(http.MethodPost, "/v1/auth/logout", nil)
+		req.Header.Set("Authorization", "Bearer invalid.signature.token")
+		rec := httptest.NewRecorder()
+		f.appHandler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 Unauthorized for invalid signature, got %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+
+	// 2. Expired access token
+	{
+		expiredToken := f.createExpiredToken(t, userID, sessionID)
+		req := httptest.NewRequest(http.MethodPost, "/v1/auth/logout", nil)
+		req.Header.Set("Authorization", "Bearer "+expiredToken)
+		rec := httptest.NewRecorder()
+		f.appHandler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 Unauthorized for expired token, got %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestAuthHandler_Logout_ValidBearerToken_RevokesOwnSession_Returns204(t *testing.T) {
 	f := setupAuthFixture(t)
 
 	userService := service.NewUserService(f.userRepo)
@@ -360,7 +435,22 @@ func TestAuthHandler_Logout_BearerToken_Success(t *testing.T) {
 		t.Fatalf("login: %v", err)
 	}
 
-	// Authenticated logout via Bearer token (no body required)
+	// Find the session ID
+	var sessionID uuid.UUID
+	f.sessionRepo.mu.RLock()
+	for id, s := range f.sessionRepo.sessionsByID {
+		u, _ := f.userRepo.GetByID(context.Background(), s.UserID)
+		if u != nil && u.Email == "logout_user@example.com" {
+			sessionID = id
+			break
+		}
+	}
+	f.sessionRepo.mu.RUnlock()
+	if sessionID == uuid.Nil {
+		t.Fatalf("session not found")
+	}
+
+	// Authenticated logout via Bearer token
 	req := httptest.NewRequest(http.MethodPost, "/v1/auth/logout", nil)
 	req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
 	rec := httptest.NewRecorder()
@@ -370,46 +460,154 @@ func TestAuthHandler_Logout_BearerToken_Success(t *testing.T) {
 		t.Fatalf("expected 204 No Content, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// Repeated logout with the same Bearer token must be idempotent (204)
-	{
-		req2 := httptest.NewRequest(http.MethodPost, "/v1/auth/logout", nil)
-		req2.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
-		rec2 := httptest.NewRecorder()
-		f.appHandler.ServeHTTP(rec2, req2)
-
-		if rec2.Code != http.StatusNoContent {
-			t.Fatalf("expected 204 No Content for repeated logout, got %d: %s", rec2.Code, rec2.Body.String())
-		}
+	// Assert session is revoked
+	active, _ := f.sessionRepo.IsActive(context.Background(), sessionID)
+	if active {
+		t.Errorf("session should be inactive after logout")
+	}
+	f.sessionRepo.mu.RLock()
+	sessionRecord := f.sessionRepo.sessionsByID[sessionID]
+	f.sessionRepo.mu.RUnlock()
+	if sessionRecord.RevokedAt == nil {
+		t.Errorf("expected RevokedAt to be set")
 	}
 }
 
-func TestAuthHandler_Logout_RaceWithRefresh(t *testing.T) {
+func TestAuthHandler_Logout_RepeatedLogout_Idempotent_PreservesTimestamp(t *testing.T) {
 	f := setupAuthFixture(t)
 
 	userService := service.NewUserService(f.userRepo)
 	_, _ = userService.CreateUser(context.Background(), service.CreateUserInput{
-		Email:    "race_user@example.com",
+		Email:    "repeat_user@example.com",
 		Password: "password123!",
 	})
 
-	// Initial login
-	tokens1, err := f.authService.Login(context.Background(), service.LoginInput{
-		Email:    "race_user@example.com",
+	tokens, err := f.authService.Login(context.Background(), service.LoginInput{
+		Email:    "repeat_user@example.com",
 		Password: "password123!",
 	})
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
 
-	// Client performs a refresh: refresh token rotates from tokens1.RefreshToken to tokens2.RefreshToken
+	// First logout
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/auth/logout", nil)
+	req1.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+	rec1 := httptest.NewRecorder()
+	f.appHandler.ServeHTTP(rec1, req1)
+
+	if rec1.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 No Content, got %d: %s", rec1.Code, rec1.Body.String())
+	}
+
+	var sessionID uuid.UUID
+	var firstRevokedAt time.Time
+	f.sessionRepo.mu.RLock()
+	for id, s := range f.sessionRepo.sessionsByID {
+		u, _ := f.userRepo.GetByID(context.Background(), s.UserID)
+		if u != nil && u.Email == "repeat_user@example.com" {
+			sessionID = id
+			firstRevokedAt = *s.RevokedAt
+			break
+		}
+	}
+	f.sessionRepo.mu.RUnlock()
+
+	time.Sleep(15 * time.Millisecond)
+
+	// Second logout for the same signed session must return 204 without changing original revocation timestamp
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/auth/logout", nil)
+	req2.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+	rec2 := httptest.NewRecorder()
+	f.appHandler.ServeHTTP(rec2, req2)
+
+	if rec2.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 No Content for repeated logout, got %d: %s", rec2.Code, rec2.Body.String())
+	}
+
+	f.sessionRepo.mu.RLock()
+	secondRevokedAt := *f.sessionRepo.sessionsByID[sessionID].RevokedAt
+	f.sessionRepo.mu.RUnlock()
+
+	if !secondRevokedAt.Equal(firstRevokedAt) {
+		t.Errorf("revocation timestamp changed on repeated logout! first: %v, second: %v", firstRevokedAt, secondRevokedAt)
+	}
+}
+
+func TestAuthHandler_Logout_AlreadyRevokedSession_ReachesIdempotentRevocation(t *testing.T) {
+	f := setupAuthFixture(t)
+
+	userService := service.NewUserService(f.userRepo)
+	_, _ = userService.CreateUser(context.Background(), service.CreateUserInput{
+		Email:    "prerevoked@example.com",
+		Password: "password123!",
+	})
+
+	tokens, err := f.authService.Login(context.Background(), service.LoginInput{
+		Email:    "prerevoked@example.com",
+		Password: "password123!",
+	})
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	// Manually pre-revoke the session with an earlier timestamp
+	pastRevokedAt := time.Now().Add(-1 * time.Hour).Truncate(time.Millisecond)
+	var sessionID uuid.UUID
+	f.sessionRepo.mu.Lock()
+	for id, s := range f.sessionRepo.sessionsByID {
+		u, _ := f.userRepo.GetByID(context.Background(), s.UserID)
+		if u != nil && u.Email == "prerevoked@example.com" {
+			sessionID = id
+			s.RevokedAt = &pastRevokedAt
+			break
+		}
+	}
+	f.sessionRepo.mu.Unlock()
+
+	// A valid signed token for an already-revoked session can still reach the idempotent revocation path
+	req := httptest.NewRequest(http.MethodPost, "/v1/auth/logout", nil)
+	req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+	rec := httptest.NewRecorder()
+	f.appHandler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 No Content for already revoked session, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	f.sessionRepo.mu.RLock()
+	currentRevokedAt := *f.sessionRepo.sessionsByID[sessionID].RevokedAt
+	f.sessionRepo.mu.RUnlock()
+
+	if !currentRevokedAt.Equal(pastRevokedAt) {
+		t.Errorf("expected original revocation timestamp %v preserved, got %v", pastRevokedAt, currentRevokedAt)
+	}
+}
+
+func TestAuthHandler_Logout_SafeDuringConcurrentRefreshRotation(t *testing.T) {
+	f := setupAuthFixture(t)
+
+	userService := service.NewUserService(f.userRepo)
+	_, _ = userService.CreateUser(context.Background(), service.CreateUserInput{
+		Email:    "concurrent_user@example.com",
+		Password: "password123!",
+	})
+
+	tokens1, err := f.authService.Login(context.Background(), service.LoginInput{
+		Email:    "concurrent_user@example.com",
+		Password: "password123!",
+	})
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	// Refresh rotates refresh token from tokens1 to tokens2
 	tokens2, err := f.authService.Refresh(context.Background(), tokens1.RefreshToken)
 	if err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 
-	// Client racing: client issues logout using the previously held tokens1.AccessToken
-	// Even though the refresh token hash has rotated in the database, the immutable session ID
-	// in tokens1.AccessToken securely establishes the caller's session and revokes it.
+	// Client racing: logout using previously issued tokens1.AccessToken
 	req := httptest.NewRequest(http.MethodPost, "/v1/auth/logout", nil)
 	req.Header.Set("Authorization", "Bearer "+tokens1.AccessToken)
 	rec := httptest.NewRecorder()
@@ -419,14 +617,54 @@ func TestAuthHandler_Logout_RaceWithRefresh(t *testing.T) {
 		t.Fatalf("expected 204 No Content, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// Verification: the session is revoked. A subsequent refresh attempt with the new refresh token fails.
+	// Session is revoked: subsequent refresh with tokens2 fails
 	_, err = f.authService.Refresh(context.Background(), tokens2.RefreshToken)
 	if !errors.Is(err, service.ErrInvalidRefreshToken) {
 		t.Fatalf("expected ErrInvalidRefreshToken after logout, got %v", err)
 	}
 }
 
-func TestAuthHandler_Logout_AttemptsToAffectAnotherSession(t *testing.T) {
+func TestAuthHandler_Logout_DatabaseFailure_Returns500AndNeverReportsSuccess(t *testing.T) {
+	f := setupAuthFixture(t)
+
+	userService := service.NewUserService(f.userRepo)
+	_, _ = userService.CreateUser(context.Background(), service.CreateUserInput{
+		Email:    "dbfail_user@example.com",
+		Password: "password123!",
+	})
+
+	tokens, err := f.authService.Login(context.Background(), service.LoginInput{
+		Email:    "dbfail_user@example.com",
+		Password: "password123!",
+	})
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	// Simulate database failure during revocation
+	f.sessionRepo.forceRevokeError = true
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/auth/logout", nil)
+	req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+	rec := httptest.NewRecorder()
+	f.appHandler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 Internal Server Error when database fails, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var prob struct {
+		Status int `json:"status"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&prob); err != nil {
+		t.Fatalf("decode problem: %v", err)
+	}
+	if prob.Status != http.StatusInternalServerError {
+		t.Errorf("expected problem status 500, got %d", prob.Status)
+	}
+}
+
+func TestAuthHandler_Logout_BodyCannotRedirectRevocationToAnotherSession(t *testing.T) {
 	f := setupAuthFixture(t)
 
 	userService := service.NewUserService(f.userRepo)
@@ -447,109 +685,50 @@ func TestAuthHandler_Logout_AttemptsToAffectAnotherSession(t *testing.T) {
 		Email:    "user_b@example.com",
 		Password: "password123!",
 	})
-	_ = tokensB
 
-	// Find session B ID from session repo
-	var sessionBID uuid.UUID
+	var sessionAID, sessionBID uuid.UUID
 	f.sessionRepo.mu.RLock()
 	for id, s := range f.sessionRepo.sessionsByID {
-		if s.UserID != uuid.Nil {
-			u, _ := f.userRepo.GetByID(context.Background(), s.UserID)
-			if u != nil && u.Email == "user_b@example.com" {
+		u, _ := f.userRepo.GetByID(context.Background(), s.UserID)
+		if u != nil {
+			if u.Email == "user_a@example.com" {
+				sessionAID = id
+			} else if u.Email == "user_b@example.com" {
 				sessionBID = id
-				break
 			}
 		}
 	}
 	f.sessionRepo.mu.RUnlock()
-	if sessionBID == uuid.Nil {
-		t.Fatalf("failed to find session B ID")
-	}
 
-	// 1. User A (authenticated with Bearer token A) attempts to revoke session B by passing session_id: sessionB
-	{
-		body, _ := json.Marshal(map[string]string{
-			"session_id": sessionBID.String(),
-		})
-		req := httptest.NewRequest(http.MethodPost, "/v1/auth/logout", bytes.NewReader(body))
-		req.Header.Set("Authorization", "Bearer "+tokensA.AccessToken)
-		rec := httptest.NewRecorder()
-		f.appHandler.ServeHTTP(rec, req)
-
-		if rec.Code != http.StatusForbidden {
-			t.Fatalf("expected 403 Forbidden for cross-session revocation attempt, got %d: %s", rec.Code, rec.Body.String())
-		}
-
-		// Ensure Session B is still active
-		active, _ := f.sessionRepo.IsActive(context.Background(), sessionBID)
-		if !active {
-			t.Errorf("Session B was improperly revoked by user A!")
-		}
-	}
-
-	// 2. Unauthenticated caller attempts to pass refresh_token A with session_id B
-	{
-		body, _ := json.Marshal(map[string]string{
-			"refresh_token": tokensA.RefreshToken,
-			"session_id":    sessionBID.String(),
-		})
-		req := httptest.NewRequest(http.MethodPost, "/v1/auth/logout", bytes.NewReader(body))
-		rec := httptest.NewRecorder()
-		f.appHandler.ServeHTTP(rec, req)
-
-		if rec.Code != http.StatusForbidden {
-			t.Fatalf("expected 403 Forbidden when refresh_token does not match session_id, got %d: %s", rec.Code, rec.Body.String())
-		}
-
-		// Ensure Session B is still active
-		active, _ := f.sessionRepo.IsActive(context.Background(), sessionBID)
-		if !active {
-			t.Errorf("Session B was improperly revoked!")
-		}
-	}
-}
-
-func TestAuthHandler_Logout_UntrustedSessionID_Rejected(t *testing.T) {
-	f := setupAuthFixture(t)
-
-	// An untrusted session ID without Bearer token or refresh token must be rejected with 401
+	// User A attempts to redirect revocation to Session B by sending Session B ID and RefreshToken in request body
 	body, _ := json.Marshal(map[string]string{
-		"session_id": uuid.New().String(),
+		"session_id":    sessionBID.String(),
+		"refresh_token": tokensB.RefreshToken,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/v1/auth/logout", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tokensA.AccessToken)
 	rec := httptest.NewRecorder()
 	f.appHandler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401 Unauthorized for untrusted session ID, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestAuthHandler_Logout_InvalidCredentials_NeverReportsSuccess(t *testing.T) {
-	f := setupAuthFixture(t)
-
-	// 1. Unknown refresh token without Bearer token must return 401
-	{
-		body, _ := json.Marshal(map[string]string{
-			"refresh_token": "unknown-nonexistent-token",
-		})
-		req := httptest.NewRequest(http.MethodPost, "/v1/auth/logout", bytes.NewReader(body))
-		rec := httptest.NewRecorder()
-		f.appHandler.ServeHTTP(rec, req)
-
-		if rec.Code != http.StatusUnauthorized {
-			t.Fatalf("expected 401 for unknown refresh token, got %d: %s", rec.Code, rec.Body.String())
-		}
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 No Content for caller's own session, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// 2. Empty body without Bearer token must return 400
-	{
-		req := httptest.NewRequest(http.MethodPost, "/v1/auth/logout", nil)
-		rec := httptest.NewRecorder()
-		f.appHandler.ServeHTTP(rec, req)
+	// Verify Session A is revoked
+	activeA, _ := f.sessionRepo.IsActive(context.Background(), sessionAID)
+	if activeA {
+		t.Errorf("User A's session should have been revoked")
+	}
 
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("expected 400 when no credentials supplied, got %d: %s", rec.Code, rec.Body.String())
-		}
+	// CRITICAL: Verify Session B is STILL ACTIVE and was NOT revoked by User A's body payload
+	activeB, _ := f.sessionRepo.IsActive(context.Background(), sessionBID)
+	if !activeB {
+		t.Errorf("Session B was improperly revoked! Client-supplied body was able to redirect revocation!")
+	}
+	f.sessionRepo.mu.RLock()
+	sessionBRecord := f.sessionRepo.sessionsByID[sessionBID]
+	f.sessionRepo.mu.RUnlock()
+	if sessionBRecord.RevokedAt != nil {
+		t.Errorf("Session B RevokedAt should be nil, but got %v", sessionBRecord.RevokedAt)
 	}
 }
