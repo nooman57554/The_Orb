@@ -7,6 +7,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/nooman57554/The_Orb/orb_libs/identity/keyloader"
 )
 
 type JWTManager struct {
@@ -33,8 +34,11 @@ func NewJWTManager(
 	if len(privateKey) != ed25519.PrivateKeySize {
 		return nil, fmt.Errorf("invalid Ed25519 private key")
 	}
-	if activeKeyID == "" || issuer == "" || audience == "" {
-		return nil, fmt.Errorf("key ID, issuer, and audience are required")
+	if !keyloader.ValidKeyID(activeKeyID) {
+		return nil, fmt.Errorf("invalid active key ID")
+	}
+	if issuer == "" || audience == "" {
+		return nil, fmt.Errorf("issuer and audience are required")
 	}
 	if ttl <= 0 {
 		return nil, fmt.Errorf("token TTL must be positive")

@@ -55,11 +55,19 @@ func NewBearerMiddleware(
 }
 
 // AllowPublic registers an explicit public route by HTTP method and exact path.
+//
+// Lifecycle: AllowPublic must only be called during server setup and initialization,
+// before concurrent request handling begins. It is not thread-safe for concurrent
+// modification once the server starts processing requests.
 func (m *BearerMiddleware) AllowPublic(method, pathStr string) *BearerMiddleware {
 	if m.publicRoutes == nil {
 		m.publicRoutes = make(map[string]struct{})
 	}
-	key := strings.ToUpper(strings.TrimSpace(method)) + " " + path.Clean(strings.TrimSpace(pathStr))
+	cleanPath := path.Clean(strings.TrimSpace(pathStr))
+	if !strings.HasPrefix(cleanPath, "/") {
+		cleanPath = "/" + cleanPath
+	}
+	key := strings.ToUpper(strings.TrimSpace(method)) + " " + cleanPath
 	m.publicRoutes[key] = struct{}{}
 	return m
 }

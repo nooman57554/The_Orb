@@ -16,16 +16,7 @@ type Principal struct {
 
 // IsValid checks whether the principal is non-nil and has non-zero required identifiers.
 func (p *Principal) IsValid() bool {
-	if p == nil {
-		return false
-	}
-	if p.UserID == uuid.Nil || p.SessionID == uuid.Nil || p.TokenID == uuid.Nil {
-		return false
-	}
-	if p.TenantID != nil && *p.TenantID == uuid.Nil {
-		return false
-	}
-	return true
+	return p.Validate() == nil
 }
 
 // Validate returns an error describing why a principal is invalid, or nil if valid.
