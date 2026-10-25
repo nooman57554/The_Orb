@@ -20,3 +20,35 @@ func TestPostgresSessionRepository_IsActive_NilUUID(t *testing.T) {
 		t.Error("expected active to be false for nil UUID")
 	}
 }
+
+func TestPostgresSessionRepository_Revoke_NilUUID(t *testing.T) {
+	repo := repository.NewPostgresSessionRepository(nil)
+	err := repo.Revoke(context.Background(), uuid.Nil)
+	if err == nil {
+		t.Fatal("expected error for nil UUID in Revoke, got nil")
+	}
+}
+
+func TestPostgresSessionRepository_RevokeByRefreshTokenHash_Empty(t *testing.T) {
+	repo := repository.NewPostgresSessionRepository(nil)
+	err := repo.RevokeByRefreshTokenHash(context.Background(), "")
+	if err == nil {
+		t.Fatal("expected error for empty token hash in RevokeByRefreshTokenHash, got nil")
+	}
+}
+
+func TestPostgresSessionRepository_RotateRefreshToken_InvalidInputs(t *testing.T) {
+	repo := repository.NewPostgresSessionRepository(nil)
+
+	if _, err := repo.RotateRefreshToken(context.Background(), "", "new"); err == nil {
+		t.Fatal("expected error for empty old token hash")
+	}
+
+	if _, err := repo.RotateRefreshToken(context.Background(), "old", ""); err == nil {
+		t.Fatal("expected error for empty new token hash")
+	}
+
+	if _, err := repo.RotateRefreshToken(context.Background(), "same", "same"); err == nil {
+		t.Fatal("expected error when old and new token hashes are identical")
+	}
+}

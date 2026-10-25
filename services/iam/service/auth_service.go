@@ -21,7 +21,10 @@ import (
 var (
 	ErrInvalidCredentials  = errors.New("invalid credentials")
 	ErrInvalidRefreshToken = errors.New("invalid refresh token")
+	ErrForbiddenSession    = errors.New("forbidden session")
 )
+
+const dummyArgon2idHash = "$argon2id$v=19$m=65536,t=3,p=4$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
 type LoginInput struct {
 	Email    string
@@ -75,6 +78,7 @@ func (s *AuthService) Login(
 	user, err := s.userRepo.GetByEmail(ctx, email)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
+			_ = verifyPassword(input.Password, dummyArgon2idHash)
 			return nil, ErrInvalidCredentials
 		}
 		return nil, fmt.Errorf("get user by email: %w", err)
@@ -203,16 +207,58 @@ func (s *AuthService) Logout(
 		ctx,
 		hashRefreshToken(refreshToken),
 	)
-	if errors.Is(err, repository.ErrNotFound) {
-		// Logout is idempotent: an already-revoked or unknown
-		// credential doesn't need a second state change.
-		return nil
-	}
 	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return ErrInvalidRefreshToken
+		}
 		return fmt.Errorf("revoke session: %w", err)
 	}
 
 	return nil
+}
+
+func (s *AuthService) LogoutSession(
+	ctx context.Context,
+	sessionID uuid.UUID,
+) error {
+	if sessionID == uuid.Nil {
+		return fmt.Errorf("session ID is required")
+	}
+
+	err := s.sessionRepo.Revoke(ctx, sessionID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return ErrInvalidRefreshToken
+		}
+		return fmt.Errorf("revoke session by ID: %w", err)
+	}
+
+	return nil
+}
+
+func (s *AuthService) LogoutWithRefreshToken(
+	ctx context.Context,
+	refreshToken string,
+	expectedSessionID uuid.UUID,
+) error {
+	if refreshToken == "" {
+		return ErrInvalidRefreshToken
+	}
+
+	hash := hashRefreshToken(refreshToken)
+	session, err := s.sessionRepo.GetByRefreshTokenHash(ctx, hash)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return ErrInvalidRefreshToken
+		}
+		return fmt.Errorf("get session for logout: %w", err)
+	}
+
+	if expectedSessionID != uuid.Nil && session.ID != expectedSessionID {
+		return ErrForbiddenSession
+	}
+
+	return s.sessionRepo.Revoke(ctx, session.ID)
 }
 
 func (s *AuthService) createAccessToken(

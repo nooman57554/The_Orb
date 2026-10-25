@@ -19,5 +19,6 @@ type SessionRepository interface {
 		newTokenHash string,
 	) (*model.Session, error)
 	RevokeByRefreshTokenHash(ctx context.Context, tokenHash string) error
+	Revoke(ctx context.Context, sessionID uuid.UUID) error
 	IsActive(ctx context.Context, sessionID uuid.UUID) (bool, error)
 }

@@ -84,6 +84,9 @@ func (s *UserService) CreateUser(
 	}
 
 	if err := s.repo.Create(ctx, user); err != nil {
+		if errors.Is(err, repository.ErrDuplicateEmail) {
+			return nil, ErrUserAlreadyExists
+		}
 		return nil, fmt.Errorf("create user: %w", err)
 	}
 

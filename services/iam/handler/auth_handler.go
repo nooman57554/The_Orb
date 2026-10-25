@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/nooman57554/The_Orb/orb_libs/httpx"
+	"github.com/nooman57554/The_Orb/orb_libs/identity"
 	"github.com/nooman57554/The_Orb/services/iam/service"
 )
 
@@ -29,7 +31,8 @@ type refreshRequest struct {
 }
 
 type logoutRequest struct {
-	RefreshToken string `json:"refresh_token"`
+	RefreshToken string `json:"refresh_token,omitempty"`
+	SessionID    string `json:"session_id,omitempty"`
 }
 
 type tokenResponse struct {
@@ -145,18 +148,83 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
+	principal, hasPrincipal := identity.PrincipalFromContext(r.Context())
+
 	var req logoutRequest
-	if err := decodeJSON(w, r, &req); err != nil {
-		httpx.WriteProblem(
-			w,
-			http.StatusBadRequest,
-			"Invalid Request",
-			"Request body must contain valid JSON.",
-		)
+	if r.Body != nil && r.Body != http.NoBody && r.ContentLength != 0 {
+		if err := decodeJSON(w, r, &req); err != nil {
+			if !errors.Is(err, io.EOF) || !hasPrincipal {
+				httpx.WriteProblem(
+					w,
+					http.StatusBadRequest,
+					"Invalid Request",
+					"Request body must contain valid JSON.",
+				)
+				return
+			}
+		}
+	}
+
+	// 1. Authenticated via Bearer token:
+	if hasPrincipal && principal != nil && principal.SessionID != uuid.Nil {
+		if req.SessionID != "" {
+			targetUUID, err := uuid.Parse(req.SessionID)
+			if err != nil {
+				httpx.WriteProblem(
+					w,
+					http.StatusBadRequest,
+					"Invalid Request",
+					"Invalid session_id format.",
+				)
+				return
+			}
+			if targetUUID != principal.SessionID {
+				httpx.WriteProblem(
+					w,
+					http.StatusForbidden,
+					"Forbidden",
+					"Cannot revoke another session.",
+				)
+				return
+			}
+		}
+
+		if err := h.authService.LogoutSession(r.Context(), principal.SessionID); err != nil {
+			if errors.Is(err, service.ErrInvalidRefreshToken) {
+				httpx.WriteProblem(
+					w,
+					http.StatusUnauthorized,
+					"Invalid Session",
+					"The session was not found or has already expired.",
+				)
+				return
+			}
+			httpx.WriteProblem(
+				w,
+				http.StatusInternalServerError,
+				"Internal Server Error",
+				"An unexpected error occurred.",
+			)
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
+	// 2. Not authenticated via Bearer token:
 	if req.RefreshToken == "" {
+		if req.SessionID != "" {
+			// Untrusted session ID supplied without authentication
+			httpx.WriteProblem(
+				w,
+				http.StatusUnauthorized,
+				"Unauthorized",
+				"Authentication required to revoke session.",
+			)
+			return
+		}
+
 		httpx.WriteProblem(
 			w,
 			http.StatusBadRequest,
@@ -166,7 +234,60 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.SessionID != "" {
+		targetUUID, err := uuid.Parse(req.SessionID)
+		if err != nil {
+			httpx.WriteProblem(
+				w,
+				http.StatusBadRequest,
+				"Invalid Request",
+				"Invalid session_id format.",
+			)
+			return
+		}
+
+		if err := h.authService.LogoutWithRefreshToken(r.Context(), req.RefreshToken, targetUUID); err != nil {
+			if errors.Is(err, service.ErrForbiddenSession) {
+				httpx.WriteProblem(
+					w,
+					http.StatusForbidden,
+					"Forbidden",
+					"Cannot revoke another session.",
+				)
+				return
+			}
+			if errors.Is(err, service.ErrInvalidRefreshToken) {
+				httpx.WriteProblem(
+					w,
+					http.StatusUnauthorized,
+					"Invalid Refresh Token",
+					"The refresh token is invalid, expired, or revoked.",
+				)
+				return
+			}
+			httpx.WriteProblem(
+				w,
+				http.StatusInternalServerError,
+				"Internal Server Error",
+				"An unexpected error occurred.",
+			)
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	if err := h.authService.Logout(r.Context(), req.RefreshToken); err != nil {
+		if errors.Is(err, service.ErrInvalidRefreshToken) {
+			httpx.WriteProblem(
+				w,
+				http.StatusUnauthorized,
+				"Invalid Refresh Token",
+				"The refresh token is invalid, expired, or revoked.",
+			)
+			return
+		}
 		httpx.WriteProblem(
 			w,
 			http.StatusInternalServerError,

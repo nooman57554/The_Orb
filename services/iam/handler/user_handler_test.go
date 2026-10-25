@@ -6,8 +6,11 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,6 +26,7 @@ import (
 )
 
 type mockUserRepository struct {
+	mu           sync.RWMutex
 	usersByID    map[uuid.UUID]*model.User
 	usersByEmail map[string]*model.User
 }
@@ -35,6 +39,13 @@ func newMockUserRepository() *mockUserRepository {
 }
 
 func (m *mockUserRepository) Create(ctx context.Context, user *model.User) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, exists := m.usersByEmail[user.Email]; exists {
+		return repository.ErrDuplicateEmail
+	}
+
 	if user.ID == uuid.Nil {
 		user.ID = uuid.New()
 	}
@@ -47,6 +58,9 @@ func (m *mockUserRepository) Create(ctx context.Context, user *model.User) error
 }
 
 func (m *mockUserRepository) GetByID(ctx context.Context, id uuid.UUID) (*model.User, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
 	u, ok := m.usersByID[id]
 	if !ok {
 		return nil, repository.ErrNotFound
@@ -55,6 +69,9 @@ func (m *mockUserRepository) GetByID(ctx context.Context, id uuid.UUID) (*model.
 }
 
 func (m *mockUserRepository) GetByEmail(ctx context.Context, email string) (*model.User, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
 	u, ok := m.usersByEmail[email]
 	if !ok {
 		return nil, repository.ErrNotFound
@@ -63,6 +80,9 @@ func (m *mockUserRepository) GetByEmail(ctx context.Context, email string) (*mod
 }
 
 func (m *mockUserRepository) Update(ctx context.Context, user *model.User) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if _, ok := m.usersByID[user.ID]; !ok {
 		return repository.ErrNotFound
 	}
@@ -73,10 +93,28 @@ func (m *mockUserRepository) Update(ctx context.Context, user *model.User) error
 }
 
 type mockSessionChecker struct {
+	mu             sync.RWMutex
 	activeSessions map[uuid.UUID]bool
+	sessionUsers   map[uuid.UUID]uuid.UUID
+	userRepo       *mockUserRepository
 }
 
 func (m *mockSessionChecker) IsActive(ctx context.Context, sessionID uuid.UUID) (bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if sessionID == uuid.Nil {
+		return false, nil
+	}
+	if active, ok := m.activeSessions[sessionID]; ok && !active {
+		return false, nil
+	}
+	if uid, ok := m.sessionUsers[sessionID]; ok && m.userRepo != nil {
+		u, err := m.userRepo.GetByID(ctx, uid)
+		if err != nil || u.Status != "active" {
+			return false, nil
+		}
+	}
 	return m.activeSessions[sessionID], nil
 }
 
@@ -124,6 +162,8 @@ func setupHandlerFixture(t *testing.T) *handlerFixture {
 
 	sessionChecker := &mockSessionChecker{
 		activeSessions: make(map[uuid.UUID]bool),
+		sessionUsers:   make(map[uuid.UUID]uuid.UUID),
+		userRepo:       userRepo,
 	}
 
 	bearerMiddleware, err := httpauth.NewBearerMiddleware(verifier, sessionChecker)
@@ -470,5 +510,254 @@ func TestFullRoute_ServeMux_Integration(t *testing.T) {
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("GET /v1/users expected 401, got %d", rec.Code)
 		}
+	}
+}
+
+func TestRegression_ProtectedEndpoint_RejectsInactiveOrSuspendedUser(t *testing.T) {
+	f := setupHandlerFixture(t)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/users/{id}", f.userHandler.GetUser)
+	appHandler := f.bearerMiddleware.Require(mux)
+
+	user := &model.User{
+		ID:        uuid.New(),
+		Email:     "victim@example.com",
+		Status:    "active",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	_ = f.userRepo.Create(context.Background(), user)
+
+	sessionID := uuid.New()
+	f.sessionChecker.mu.Lock()
+	f.sessionChecker.activeSessions[sessionID] = true
+	f.sessionChecker.sessionUsers[sessionID] = user.ID
+	f.sessionChecker.mu.Unlock()
+
+	token, err := f.jwtManager.CreateAccessToken(auth.Claims{
+		UserID:    user.ID,
+		SessionID: sessionID,
+		TokenID:   uuid.New(),
+	})
+	if err != nil {
+		t.Fatalf("create access token: %v", err)
+	}
+
+	// 1. While active: request succeeds
+	{
+		req := httptest.NewRequest(http.MethodGet, "/v1/users/"+user.ID.String(), nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		appHandler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200 for active user, got %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+
+	// 2. Suspend user: previously valid token must immediately be rejected
+	user.Status = "suspended"
+	_ = f.userRepo.Update(context.Background(), user)
+	{
+		req := httptest.NewRequest(http.MethodGet, "/v1/users/"+user.ID.String(), nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		appHandler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("expected status 401 for suspended user, got %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+
+	// 3. Deactivate user: previously valid token must also be rejected
+	user.Status = "deactivated"
+	_ = f.userRepo.Update(context.Background(), user)
+	{
+		req := httptest.NewRequest(http.MethodGet, "/v1/users/"+user.ID.String(), nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		appHandler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("expected status 401 for deactivated user, got %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestUserHandler_CreateUser_RequestBodyLimit_1MiB(t *testing.T) {
+	f := setupHandlerFixture(t)
+
+	// Construct oversized payload (> 1 MiB)
+	largeString := strings.Repeat("a", (1<<20)+512)
+	body := fmt.Sprintf(`{"email":"test@example.com","password":"%s"}`, largeString)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/users", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	f.userHandler.CreateUser(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for oversized payload, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestUserHandler_CreateUser_MalformedJSON(t *testing.T) {
+	f := setupHandlerFixture(t)
+
+	body := `{"email":"test@example.com","password":`
+	req := httptest.NewRequest(http.MethodPost, "/v1/users", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	f.userHandler.CreateUser(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for malformed json, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestUserHandler_CreateUser_UnknownFields(t *testing.T) {
+	f := setupHandlerFixture(t)
+
+	body := `{"email":"test@example.com","password":"password123","role":"admin"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/users", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	f.userHandler.CreateUser(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unknown fields, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestUserHandler_CreateUser_MultipleJSONValues(t *testing.T) {
+	f := setupHandlerFixture(t)
+
+	body := `{"email":"test@example.com","password":"password123"}{"extra":"data"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/users", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	f.userHandler.CreateUser(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for multiple json values, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestUserHandler_CreateUser_EmailValidation(t *testing.T) {
+	f := setupHandlerFixture(t)
+
+	tests := []struct {
+		name       string
+		email      string
+		wantStatus int
+	}{
+		{"empty email", "", http.StatusBadRequest},
+		{"whitespace email", "   ", http.StatusBadRequest},
+		{"not an email", "notanemail", http.StatusBadRequest},
+		{"missing domain", "user@", http.StatusBadRequest},
+		{"missing user", "@example.com", http.StatusBadRequest},
+		{"dot without domain", "user@.com", http.StatusBadRequest},
+		{"domain without dot", "user@localhost", http.StatusBadRequest},
+		{"email with spaces", "user name@example.com", http.StatusBadRequest},
+		{"valid email", "alice.smith+tag@example.com", http.StatusCreated},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := map[string]string{
+				"email":    tc.email,
+				"password": "validPassword123!",
+			}
+			b, _ := json.Marshal(payload)
+			req := httptest.NewRequest(http.MethodPost, "/v1/users", bytes.NewReader(b))
+			rec := httptest.NewRecorder()
+
+			f.userHandler.CreateUser(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Errorf("email %q: expected status %d, got %d: %s", tc.email, tc.wantStatus, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestUserHandler_CreateUser_PasswordBounds(t *testing.T) {
+	f := setupHandlerFixture(t)
+
+	tests := []struct {
+		name       string
+		password   string
+		wantStatus int
+	}{
+		{"too short (7 chars)", "1234567", http.StatusBadRequest},
+		{"min length (8 chars)", "12345678", http.StatusCreated},
+		{"max length (128 chars)", strings.Repeat("a", 128), http.StatusCreated},
+		{"too long (129 chars)", strings.Repeat("a", 129), http.StatusBadRequest},
+	}
+
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := map[string]string{
+				"email":    fmt.Sprintf("user%d@example.com", i),
+				"password": tc.password,
+			}
+			b, _ := json.Marshal(payload)
+			req := httptest.NewRequest(http.MethodPost, "/v1/users", bytes.NewReader(b))
+			rec := httptest.NewRecorder()
+
+			f.userHandler.CreateUser(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Errorf("password length %d: expected status %d, got %d: %s", len(tc.password), tc.wantStatus, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestUserHandler_CreateUser_ConcurrentRegistration_Conflict(t *testing.T) {
+	f := setupHandlerFixture(t)
+
+	const concurrency = 10
+	var wg sync.WaitGroup
+	statusCodes := make([]int, concurrency)
+
+	targetEmail := "concurrent@example.com"
+	password := "safePassword123!"
+
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			payload := map[string]string{
+				"email":    targetEmail,
+				"password": password,
+			}
+			b, _ := json.Marshal(payload)
+			req := httptest.NewRequest(http.MethodPost, "/v1/users", bytes.NewReader(b))
+			rec := httptest.NewRecorder()
+
+			f.userHandler.CreateUser(rec, req)
+			statusCodes[idx] = rec.Code
+		}(i)
+	}
+
+	wg.Wait()
+
+	var createdCount int
+	var conflictCount int
+	for _, code := range statusCodes {
+		switch code {
+		case http.StatusCreated:
+			createdCount++
+		case http.StatusConflict:
+			conflictCount++
+		default:
+			t.Errorf("unexpected status code during concurrent registration: %d", code)
+		}
+	}
+
+	if createdCount != 1 {
+		t.Errorf("expected exactly 1 registration to succeed, got %d", createdCount)
+	}
+	if conflictCount != concurrency-1 {
+		t.Errorf("expected %d conflict responses, got %d", concurrency-1, conflictCount)
 	}
 }

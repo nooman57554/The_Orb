@@ -150,18 +150,45 @@ func (r *PostgresSessionRepository) RevokeByRefreshTokenHash(
 
 	const query = `
 		UPDATE sessions
-		SET revoked_at = NOW()
+		SET revoked_at = COALESCE(revoked_at, NOW())
 		WHERE token_hash = $1
-		  AND revoked_at IS NULL
+		RETURNING id
 	`
 
-	tag, err := r.db.Pool().Exec(ctx, query, tokenHash)
+	var id uuid.UUID
+	err := r.db.Pool().QueryRow(ctx, query, tokenHash).Scan(&id)
 	if err != nil {
-		return fmt.Errorf("revoke session: %w", err)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("revoke session by refresh token hash: %w", err)
 	}
 
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+	return nil
+}
+
+func (r *PostgresSessionRepository) Revoke(
+	ctx context.Context,
+	sessionID uuid.UUID,
+) error {
+	if sessionID == uuid.Nil {
+		return fmt.Errorf("session ID is required")
+	}
+
+	const query = `
+		UPDATE sessions
+		SET revoked_at = COALESCE(revoked_at, NOW())
+		WHERE id = $1
+		RETURNING id
+	`
+
+	var id uuid.UUID
+	err := r.db.Pool().QueryRow(ctx, query, sessionID).Scan(&id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("revoke session: %w", err)
 	}
 
 	return nil
@@ -178,10 +205,12 @@ func (r *PostgresSessionRepository) IsActive(
 	const query = `
 		SELECT EXISTS (
 			SELECT 1
-			FROM sessions
-			WHERE id = $1
-			  AND revoked_at IS NULL
-			  AND expires_at > NOW()
+			FROM sessions s
+			JOIN users u ON u.id = s.user_id
+			WHERE s.id = $1
+			  AND s.revoked_at IS NULL
+			  AND s.expires_at > NOW()
+			  AND u.status = 'active'
 		)
 	`
 

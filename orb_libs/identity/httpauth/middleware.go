@@ -96,6 +96,15 @@ func normalizeRouteKey(route string) string {
 func (m *BearerMiddleware) Require(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if m.isPublic(r.Method, r.URL.Path) {
+			authHeader := r.Header.Get("Authorization")
+			if strings.HasPrefix(authHeader, "Bearer ") {
+				parts := strings.Split(authHeader, " ")
+				if len(parts) == 2 && parts[0] == "Bearer" && parts[1] != "" && !strings.ContainsAny(parts[1], " \t\r\n") {
+					if principal, err := m.verifier.VerifyAccessToken(parts[1]); err == nil && principal != nil && principal.IsValid() {
+						r = r.WithContext(identity.WithPrincipal(r.Context(), principal))
+					}
+				}
+			}
 			next.ServeHTTP(w, r)
 			return
 		}

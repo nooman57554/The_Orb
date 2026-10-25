@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/mail"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -28,13 +30,32 @@ type createUserRequest struct {
 	Password string `json:"password"`
 }
 
+func isValidEmail(email string) bool {
+	if len(email) == 0 || len(email) > 254 {
+		return false
+	}
+	addr, err := mail.ParseAddress(email)
+	if err != nil || addr.Address != email {
+		return false
+	}
+	parts := strings.Split(email, "@")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return false
+	}
+	domain := parts[1]
+	if !strings.Contains(domain, ".") || strings.HasPrefix(domain, ".") || strings.HasSuffix(domain, ".") {
+		return false
+	}
+	return true
+}
+
 func (h *UserHandler) CreateUser(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
 	var req createUserRequest
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		httpx.WriteProblem(
 			w,
 			http.StatusBadRequest,
@@ -44,22 +65,23 @@ func (h *UserHandler) CreateUser(
 		return
 	}
 
-	if req.Email == "" {
+	email := strings.TrimSpace(req.Email)
+	if !isValidEmail(email) {
 		httpx.WriteProblem(
 			w,
 			http.StatusBadRequest,
 			"Invalid Request",
-			"email is required.",
+			"A valid email address is required.",
 		)
 		return
 	}
 
-	if req.Password == "" {
+	if len(req.Password) < 8 || len(req.Password) > 128 {
 		httpx.WriteProblem(
 			w,
 			http.StatusBadRequest,
 			"Invalid Request",
-			"password is required.",
+			"Password must be between 8 and 128 characters.",
 		)
 		return
 	}
@@ -67,7 +89,7 @@ func (h *UserHandler) CreateUser(
 	user, err := h.userService.CreateUser(
 		r.Context(),
 		service.CreateUserInput{
-			Email:    req.Email,
+			Email:    email,
 			Password: req.Password,
 		},
 	)

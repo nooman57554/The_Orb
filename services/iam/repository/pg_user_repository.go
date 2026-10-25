@@ -7,11 +7,15 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/nooman57554/The_Orb/orb_libs/dbconnector"
 	"github.com/nooman57554/The_Orb/services/iam/model"
 )
 
-var ErrNotFound = errors.New("Not Found")
+var (
+	ErrNotFound       = errors.New("Not Found")
+	ErrDuplicateEmail = errors.New("duplicate email: user already exists")
+)
 
 type PostgresUserRepository struct {
 	db *dbconnector.DBConnector
@@ -132,6 +136,10 @@ func (r *PostgresUserRepository) Create(
 	)
 
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "users_email_key" {
+			return ErrDuplicateEmail
+		}
 		return fmt.Errorf("create user: %w", err)
 	}
 

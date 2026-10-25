@@ -154,6 +154,62 @@ func TestBearerMiddleware_PublicRoute_Exempted(t *testing.T) {
 	}
 }
 
+func TestBearerMiddleware_PublicRoute_OptionalTokenContext(t *testing.T) {
+	expectedPrincipal := &identity.Principal{
+		UserID:    uuid.New(),
+		SessionID: uuid.New(),
+		TokenID:   uuid.New(),
+	}
+
+	verifier := &mockTokenVerifier{
+		verifyFn: func(token string) (*identity.Principal, error) {
+			if token == "valid-token" {
+				return expectedPrincipal, nil
+			}
+			return nil, errors.New("invalid token")
+		},
+	}
+	mw, _ := httpauth.NewBearerMiddleware(verifier, nil, "POST /v1/auth/logout")
+
+	var capturedPrincipal *identity.Principal
+	handler := mw.Require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p, _ := identity.PrincipalFromContext(r.Context())
+		capturedPrincipal = p
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// 1. With valid bearer token: principal is injected into context
+	{
+		req := httptest.NewRequest(http.MethodPost, "/v1/auth/logout", nil)
+		req.Header.Set("Authorization", "Bearer valid-token")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+		if capturedPrincipal == nil || capturedPrincipal.UserID != expectedPrincipal.UserID {
+			t.Fatalf("expected principal to be injected, got %v", capturedPrincipal)
+		}
+	}
+
+	// 2. With invalid bearer token: public route still succeeds, principal is nil
+	{
+		capturedPrincipal = nil
+		req := httptest.NewRequest(http.MethodPost, "/v1/auth/logout", nil)
+		req.Header.Set("Authorization", "Bearer bad-token")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+		if capturedPrincipal != nil {
+			t.Fatalf("expected nil principal for invalid token on public route, got %v", capturedPrincipal)
+		}
+	}
+}
+
 func TestBearerMiddleware_AllowPublic_Method(t *testing.T) {
 	verifier := &mockTokenVerifier{}
 	mw, _ := httpauth.NewBearerMiddleware(verifier, nil)
