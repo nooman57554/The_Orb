@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/nooman57554/The_Orb/orb_libs/identity"
 	"github.com/nooman57554/The_Orb/orb_libs/identity/httpauth"
+	"github.com/nooman57554/The_Orb/orb_libs/identity/jwtverify"
 	"github.com/nooman57554/The_Orb/services/iam/auth"
 	"github.com/nooman57554/The_Orb/services/iam/handler"
 	"github.com/nooman57554/The_Orb/services/iam/model"
@@ -113,7 +114,11 @@ func setupHandlerFixture(t *testing.T) *handlerFixture {
 		t.Fatalf("create JWT manager: %v", err)
 	}
 
-	verifier, err := auth.NewJWTPrincipalVerifier(jwtManager)
+	verifier, err := jwtverify.NewVerifier(
+		map[string]ed25519.PublicKey{keyID: pub},
+		"orb-iam",
+		"orb-platform",
+	)
 	if err != nil {
 		t.Fatalf("create principal verifier: %v", err)
 	}
@@ -368,9 +373,13 @@ func TestUserHandler_GetUser_SpoofedHeaderIgnored(t *testing.T) {
 func TestFullRoute_ServeMux_Integration(t *testing.T) {
 	f := setupHandlerFixture(t)
 
+	f.bearerMiddleware.AllowPublic("POST", "/v1/users")
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/users", f.userHandler.CreateUser)
-	mux.Handle("GET /v1/users/{id}", f.bearerMiddleware.Require(http.HandlerFunc(f.userHandler.GetUser)))
+	mux.HandleFunc("GET /v1/users/{id}", f.userHandler.GetUser)
+
+	appHandler := f.bearerMiddleware.Require(mux)
 
 	userA := &model.User{ID: uuid.New(), Email: "user_a@example.com", Status: "active"}
 	userB := &model.User{ID: uuid.New(), Email: "user_b@example.com", Status: "active"}
@@ -393,7 +402,7 @@ func TestFullRoute_ServeMux_Integration(t *testing.T) {
 	{
 		req := httptest.NewRequest(http.MethodGet, "/v1/users/"+userA.ID.String(), nil)
 		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, req)
+		appHandler.ServeHTTP(rec, req)
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("unauthenticated request expected 401, got %d", rec.Code)
 		}
@@ -404,7 +413,7 @@ func TestFullRoute_ServeMux_Integration(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/v1/users/"+userA.ID.String(), nil)
 		req.Header.Set("Authorization", "Bearer "+tokenA)
 		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, req)
+		appHandler.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
 			t.Errorf("authenticated self lookup expected 200, got %d: %s", rec.Code, rec.Body.String())
 		}
@@ -415,7 +424,7 @@ func TestFullRoute_ServeMux_Integration(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/v1/users/"+userB.ID.String(), nil)
 		req.Header.Set("Authorization", "Bearer "+tokenA)
 		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, req)
+		appHandler.ServeHTTP(rec, req)
 		if rec.Code != http.StatusForbidden {
 			t.Errorf("cross-user lookup expected 403, got %d: %s", rec.Code, rec.Body.String())
 		}
@@ -434,7 +443,7 @@ func TestFullRoute_ServeMux_Integration(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/v1/users/"+userA.ID.String(), nil)
 		req.Header.Set("Authorization", "Bearer "+tokenRevoked)
 		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, req)
+		appHandler.ServeHTTP(rec, req)
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("revoked session expected 401, got %d", rec.Code)
 		}
@@ -448,9 +457,19 @@ func TestFullRoute_ServeMux_Integration(t *testing.T) {
 		})
 		req := httptest.NewRequest(http.MethodPost, "/v1/users", bytes.NewReader(body))
 		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, req)
+		appHandler.ServeHTTP(rec, req)
 		if rec.Code != http.StatusCreated {
 			t.Errorf("POST /v1/users registration expected 201 without token, got %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+
+	// 6. Unregistered or other methods not on public allowlist are protected by default -> 401
+	{
+		req := httptest.NewRequest(http.MethodGet, "/v1/users", nil)
+		rec := httptest.NewRecorder()
+		appHandler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("GET /v1/users expected 401, got %d", rec.Code)
 		}
 	}
 }

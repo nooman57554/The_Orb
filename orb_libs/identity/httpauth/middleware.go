@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"path"
 	"strings"
 
 	"github.com/google/uuid"
@@ -19,27 +20,79 @@ type SessionChecker interface {
 
 // BearerMiddleware authenticates HTTP requests using Bearer tokens and
 // injects the verified identity.Principal into the request context.
+// Requests are protected by default unless matching an explicitly configured public route.
 type BearerMiddleware struct {
 	verifier       identity.TokenVerifier
 	sessionChecker SessionChecker
+	publicRoutes   map[string]struct{}
 }
 
 // NewBearerMiddleware creates a new BearerMiddleware instance.
 // Verifier is required. SessionChecker is optional (pass nil to disable session checks).
-func NewBearerMiddleware(verifier identity.TokenVerifier, sessionChecker SessionChecker) (*BearerMiddleware, error) {
+// publicRoutes is an optional list of routes formatted as "METHOD /path" (e.g. "POST /v1/auth/login").
+func NewBearerMiddleware(
+	verifier identity.TokenVerifier,
+	sessionChecker SessionChecker,
+	publicRoutes ...string,
+) (*BearerMiddleware, error) {
 	if verifier == nil {
 		return nil, fmt.Errorf("token verifier is required")
+	}
+
+	routes := make(map[string]struct{}, len(publicRoutes))
+	for _, r := range publicRoutes {
+		norm := normalizeRouteKey(r)
+		if norm != "" {
+			routes[norm] = struct{}{}
+		}
 	}
 
 	return &BearerMiddleware{
 		verifier:       verifier,
 		sessionChecker: sessionChecker,
+		publicRoutes:   routes,
 	}, nil
 }
 
-// Require wraps an http.Handler with bearer token authentication and session state checks.
+// AllowPublic registers an explicit public route by HTTP method and exact path.
+func (m *BearerMiddleware) AllowPublic(method, pathStr string) *BearerMiddleware {
+	if m.publicRoutes == nil {
+		m.publicRoutes = make(map[string]struct{})
+	}
+	key := strings.ToUpper(strings.TrimSpace(method)) + " " + path.Clean(strings.TrimSpace(pathStr))
+	m.publicRoutes[key] = struct{}{}
+	return m
+}
+
+func (m *BearerMiddleware) isPublic(method, reqPath string) bool {
+	if len(m.publicRoutes) == 0 {
+		return false
+	}
+	cleanPath := path.Clean(reqPath)
+	key := strings.ToUpper(strings.TrimSpace(method)) + " " + cleanPath
+	_, ok := m.publicRoutes[key]
+	return ok
+}
+
+func normalizeRouteKey(route string) string {
+	parts := strings.Fields(route)
+	if len(parts) == 2 {
+		return strings.ToUpper(parts[0]) + " " + path.Clean(parts[1])
+	}
+	return ""
+}
+
+// Require wraps an http.Handler with default bearer-token authentication.
+// If the incoming request matches an explicitly registered public route, authentication
+// is bypassed and the next handler is called directly without injecting a principal.
+// All other requests require a valid bearer token and active session.
 func (m *BearerMiddleware) Require(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if m.isPublic(r.Method, r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
 			httpx.WriteProblem(

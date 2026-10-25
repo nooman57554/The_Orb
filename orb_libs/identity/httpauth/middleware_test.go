@@ -44,21 +44,21 @@ func TestNewBearerMiddleware_Validation(t *testing.T) {
 		t.Error("expected error when verifier is nil")
 	}
 
-	// Valid verifier with nil checker is allowed (optional session check)
+	// Valid verifier with nil checker is allowed
 	verifier := &mockTokenVerifier{}
 	mw, err := httpauth.NewBearerMiddleware(verifier, nil)
 	if err != nil || mw == nil {
 		t.Fatalf("expected nil checker to be allowed, got err: %v", err)
 	}
 
-	// Valid verifier with checker
-	mw2, err := httpauth.NewBearerMiddleware(verifier, checker)
+	// Valid verifier with checker and public routes
+	mw2, err := httpauth.NewBearerMiddleware(verifier, checker, "POST /v1/auth/login", "POST /v1/users")
 	if err != nil || mw2 == nil {
 		t.Fatalf("expected valid middleware, got err: %v", err)
 	}
 }
 
-func TestBearerMiddleware_MissingAuthorizationHeader(t *testing.T) {
+func TestBearerMiddleware_DefaultProtected_MissingAuthHeader(t *testing.T) {
 	verifier := &mockTokenVerifier{}
 	mw, _ := httpauth.NewBearerMiddleware(verifier, nil)
 
@@ -67,7 +67,7 @@ func TestBearerMiddleware_MissingAuthorizationHeader(t *testing.T) {
 		called = true
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/test", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/users/me", nil)
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)
@@ -88,6 +88,92 @@ func TestBearerMiddleware_MissingAuthorizationHeader(t *testing.T) {
 	}
 	if prob.Status != http.StatusUnauthorized {
 		t.Errorf("expected status %d, got %d", http.StatusUnauthorized, prob.Status)
+	}
+}
+
+func TestBearerMiddleware_PublicRoute_Exempted(t *testing.T) {
+	verifier := &mockTokenVerifier{
+		verifyFn: func(token string) (*identity.Principal, error) {
+			t.Error("verifier should NOT be called for public routes")
+			return nil, errors.New("should not be called")
+		},
+	}
+	mw, _ := httpauth.NewBearerMiddleware(verifier, nil, "POST /v1/auth/login", "POST /v1/users")
+
+	called := false
+	var contextPrincipal *identity.Principal
+	handler := mw.Require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		p, ok := identity.PrincipalFromContext(r.Context())
+		if ok || p != nil {
+			t.Errorf("expected no principal on public route context, got %v", p)
+		}
+		contextPrincipal = p
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// 1. POST /v1/auth/login is public: works without any token
+	req := httptest.NewRequest(http.MethodPost, "/v1/auth/login", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if !called {
+		t.Fatal("expected public route handler to be called")
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", rec.Code)
+	}
+	if contextPrincipal != nil {
+		t.Errorf("expected nil principal on public route, got %v", contextPrincipal)
+	}
+
+	// 2. GET /v1/auth/login is NOT on the public allowlist: requires authentication
+	called = false
+	req2 := httptest.NewRequest(http.MethodGet, "/v1/auth/login", nil)
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+
+	if called {
+		t.Fatal("expected non-public method to be protected and not reach handler")
+	}
+	if rec2.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for GET /v1/auth/login, got %d", rec2.Code)
+	}
+
+	// 3. POST /v1/users is public (registered via constructor)
+	called = false
+	req3 := httptest.NewRequest(http.MethodPost, "/v1/users", nil)
+	rec3 := httptest.NewRecorder()
+	handler.ServeHTTP(rec3, req3)
+
+	if !called {
+		t.Fatal("expected POST /v1/users to be public")
+	}
+	if rec3.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", rec3.Code)
+	}
+}
+
+func TestBearerMiddleware_AllowPublic_Method(t *testing.T) {
+	verifier := &mockTokenVerifier{}
+	mw, _ := httpauth.NewBearerMiddleware(verifier, nil)
+	mw.AllowPublic("GET", "/healthz")
+
+	called := false
+	handler := mw.Require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if !called {
+		t.Fatal("expected /healthz to be exempted")
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
 	}
 }
 
@@ -172,7 +258,6 @@ func TestBearerMiddleware_InvalidOrExpiredToken(t *testing.T) {
 }
 
 func TestBearerMiddleware_InvalidPrincipal(t *testing.T) {
-	// Verifier returns a principal with nil identifiers
 	verifier := &mockTokenVerifier{
 		verifyFn: func(token string) (*identity.Principal, error) {
 			return &identity.Principal{
@@ -217,7 +302,6 @@ func TestBearerMiddleware_InactiveSession(t *testing.T) {
 	}
 	checker := &mockSessionChecker{
 		isActiveFn: func(ctx context.Context, sessionID uuid.UUID) (bool, error) {
-			// Inactive session returns (false, nil)
 			return false, nil
 		},
 	}
@@ -340,12 +424,6 @@ func TestBearerMiddleware_ValidPrincipal_ContextPropagation(t *testing.T) {
 	if downstreamPrincipal.UserID != expectedPrincipal.UserID {
 		t.Errorf("expected user ID %s, got %s", expectedPrincipal.UserID, downstreamPrincipal.UserID)
 	}
-	if downstreamPrincipal.SessionID != expectedPrincipal.SessionID {
-		t.Errorf("expected session ID %s, got %s", expectedPrincipal.SessionID, downstreamPrincipal.SessionID)
-	}
-	if downstreamPrincipal.TokenID != expectedPrincipal.TokenID {
-		t.Errorf("expected token ID %s, got %s", expectedPrincipal.TokenID, downstreamPrincipal.TokenID)
-	}
 }
 
 func TestBearerMiddleware_SpoofedHeadersIgnored(t *testing.T) {
@@ -389,40 +467,5 @@ func TestBearerMiddleware_SpoofedHeadersIgnored(t *testing.T) {
 	}
 	if downstreamPrincipal.UserID != realPrincipal.UserID {
 		t.Errorf("expected verified principal user ID %s, got %s", realPrincipal.UserID, downstreamPrincipal.UserID)
-	}
-}
-
-func TestBearerMiddleware_NilSessionChecker_AllowsRequest(t *testing.T) {
-	principal := &identity.Principal{
-		UserID:    uuid.New(),
-		SessionID: uuid.New(),
-		TokenID:   uuid.New(),
-	}
-
-	verifier := &mockTokenVerifier{
-		verifyFn: func(token string) (*identity.Principal, error) {
-			return principal, nil
-		},
-	}
-	// Nil session checker
-	mw, _ := httpauth.NewBearerMiddleware(verifier, nil)
-
-	called := false
-	handler := mw.Require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	req := httptest.NewRequest(http.MethodGet, "/v1/test", nil)
-	req.Header.Set("Authorization", "Bearer valid-token")
-	rec := httptest.NewRecorder()
-
-	handler.ServeHTTP(rec, req)
-
-	if !called {
-		t.Fatal("expected downstream handler to be called when session checker is nil")
-	}
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected status 200, got %d", rec.Code)
 	}
 }

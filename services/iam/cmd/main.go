@@ -9,6 +9,7 @@ import (
 
 	"github.com/nooman57554/The_Orb/orb_libs/dbconnector"
 	"github.com/nooman57554/The_Orb/orb_libs/identity/httpauth"
+	"github.com/nooman57554/The_Orb/orb_libs/identity/jwtverify"
 	"github.com/nooman57554/The_Orb/services/iam/auth"
 	"github.com/nooman57554/The_Orb/services/iam/config"
 	"github.com/nooman57554/The_Orb/services/iam/handler"
@@ -42,10 +43,10 @@ func main() {
 	}
 	defer db.Close()
 
-	// create JWT manager
-	jwtManager, err := getJWTManager(cfg)
+	// initialize JWT manager and verifier
+	jwtManager, tokenVerifier, err := initAuth(cfg)
 	if err != nil {
-		log.Fatalf("get JWT manager: %v", err)
+		log.Fatalf("initialize JWT auth: %v", err)
 	}
 
 	// create repositories
@@ -69,14 +70,15 @@ func main() {
 	userHandler := handler.NewUserHandler(userService)
 	authHandler := handler.NewAuthHandler(authService)
 
-	// create token verifier adapter
-	tokenVerifier, err := auth.NewJWTPrincipalVerifier(jwtManager)
-	if err != nil {
-		log.Fatalf("initialize token verifier: %v", err)
-	}
-
-	// create bearer middleware
-	bearerMiddleware, err := httpauth.NewBearerMiddleware(tokenVerifier, sessionRepo)
+	// create bearer middleware with default-protected routing and explicit public exemptions
+	bearerMiddleware, err := httpauth.NewBearerMiddleware(
+		tokenVerifier,
+		sessionRepo,
+		"POST /v1/auth/login",
+		"POST /v1/auth/refresh",
+		"POST /v1/auth/logout",
+		"POST /v1/users",
+	)
 	if err != nil {
 		log.Fatalf("initialize bearer middleware: %v", err)
 	}
@@ -86,7 +88,7 @@ func main() {
 
 	// User routes
 	mux.HandleFunc("POST /v1/users", userHandler.CreateUser)
-	mux.Handle("GET /v1/users/{id}", bearerMiddleware.Require(http.HandlerFunc(userHandler.GetUser)))
+	mux.HandleFunc("GET /v1/users/{id}", userHandler.GetUser)
 
 	// Auth routes
 	mux.HandleFunc("POST /v1/auth/login", authHandler.Login)
@@ -95,7 +97,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:    ":8080",
-		Handler: mux,
+		Handler: bearerMiddleware.Require(mux),
 	}
 
 	log.Println("IAM server listening on :8080")
@@ -107,20 +109,19 @@ func main() {
 	log.Println("IAM initialized")
 }
 
-func getJWTManager(cfg config.Config) (*auth.JWTManager, error) {
-
+func initAuth(cfg config.Config) (*auth.JWTManager, *jwtverify.Verifier, error) {
 	keyLoader, err := keyloader.NewFileLoader(
 		cfg.JWTPrivateKeyPath,
 		cfg.JWTPublicKeysDir,
 		cfg.JWTKeyID,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("configure JWT key loader: %w", err)
+		return nil, nil, fmt.Errorf("configure JWT key loader: %w", err)
 	}
 
 	keySet, err := keyLoader.Load(context.Background())
 	if err != nil {
-		return nil, fmt.Errorf("load JWT keys: %w", err)
+		return nil, nil, fmt.Errorf("load JWT keys: %w", err)
 	}
 
 	jwtManager, err := auth.NewJWTManager(
@@ -132,8 +133,17 @@ func getJWTManager(cfg config.Config) (*auth.JWTManager, error) {
 		cfg.JWTTTL,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("initialize JWT manager: %w", err)
+		return nil, nil, fmt.Errorf("initialize JWT manager: %w", err)
 	}
 
-	return jwtManager, nil
+	tokenVerifier, err := jwtverify.NewVerifier(
+		keySet.PublicKeys,
+		cfg.JWTIssuer,
+		cfg.JWTAudience,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("initialize token verifier: %w", err)
+	}
+
+	return jwtManager, tokenVerifier, nil
 }

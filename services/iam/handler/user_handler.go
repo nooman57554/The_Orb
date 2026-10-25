@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/nooman57554/The_Orb/orb_libs/httpx"
 	"github.com/nooman57554/The_Orb/orb_libs/identity"
 	"github.com/nooman57554/The_Orb/services/iam/repository"
 	"github.com/nooman57554/The_Orb/services/iam/service"
@@ -34,7 +35,7 @@ func (h *UserHandler) CreateUser(
 	var req createUserRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeProblem(
+		httpx.WriteProblem(
 			w,
 			http.StatusBadRequest,
 			"Invalid Request",
@@ -44,7 +45,7 @@ func (h *UserHandler) CreateUser(
 	}
 
 	if req.Email == "" {
-		writeProblem(
+		httpx.WriteProblem(
 			w,
 			http.StatusBadRequest,
 			"Invalid Request",
@@ -54,7 +55,7 @@ func (h *UserHandler) CreateUser(
 	}
 
 	if req.Password == "" {
-		writeProblem(
+		httpx.WriteProblem(
 			w,
 			http.StatusBadRequest,
 			"Invalid Request",
@@ -73,7 +74,7 @@ func (h *UserHandler) CreateUser(
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrUserAlreadyExists):
-			writeProblem(
+			httpx.WriteProblem(
 				w,
 				http.StatusConflict,
 				"User Already Exists",
@@ -81,7 +82,7 @@ func (h *UserHandler) CreateUser(
 			)
 
 		default:
-			writeProblem(
+			httpx.WriteProblem(
 				w,
 				http.StatusInternalServerError,
 				"Internal Server Error",
@@ -119,7 +120,7 @@ func (h *UserHandler) GetUser(
 ) {
 	principal, ok := identity.PrincipalFromContext(r.Context())
 	if !ok || principal == nil || principal.UserID == uuid.Nil {
-		writeProblem(
+		httpx.WriteProblem(
 			w,
 			http.StatusUnauthorized,
 			"Unauthorized",
@@ -130,7 +131,7 @@ func (h *UserHandler) GetUser(
 
 	userID, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
-		writeProblem(
+		httpx.WriteProblem(
 			w,
 			http.StatusBadRequest,
 			"Invalid Request",
@@ -140,7 +141,7 @@ func (h *UserHandler) GetUser(
 	}
 
 	if principal.UserID != userID {
-		writeProblem(
+		httpx.WriteProblem(
 			w,
 			http.StatusForbidden,
 			"Forbidden",
@@ -152,7 +153,7 @@ func (h *UserHandler) GetUser(
 	user, err := h.userService.GetUserByID(r.Context(), userID)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
-			writeProblem(
+			httpx.WriteProblem(
 				w,
 				http.StatusNotFound,
 				"User Not Found",
@@ -161,7 +162,7 @@ func (h *UserHandler) GetUser(
 			return
 		}
 
-		writeProblem(
+		httpx.WriteProblem(
 			w,
 			http.StatusInternalServerError,
 			"Internal Server Error",

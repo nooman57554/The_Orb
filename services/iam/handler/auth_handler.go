@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/nooman57554/The_Orb/orb_libs/httpx"
 	"github.com/nooman57554/The_Orb/services/iam/service"
 )
 
@@ -41,7 +42,7 @@ type tokenResponse struct {
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	var req loginRequest
 	if err := decodeJSON(w, r, &req); err != nil {
-		writeProblem(
+		httpx.WriteProblem(
 			w,
 			http.StatusBadRequest,
 			"Invalid Request",
@@ -51,7 +52,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if strings.TrimSpace(req.Email) == "" || req.Password == "" {
-		writeProblem(
+		httpx.WriteProblem(
 			w,
 			http.StatusBadRequest,
 			"Invalid Request",
@@ -66,7 +67,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if errors.Is(err, service.ErrInvalidCredentials) {
-			writeProblem(
+			httpx.WriteProblem(
 				w,
 				http.StatusUnauthorized,
 				"Invalid Credentials",
@@ -75,7 +76,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		writeProblem(
+		httpx.WriteProblem(
 			w,
 			http.StatusInternalServerError,
 			"Internal Server Error",
@@ -95,7 +96,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	var req refreshRequest
 	if err := decodeJSON(w, r, &req); err != nil {
-		writeProblem(
+		httpx.WriteProblem(
 			w,
 			http.StatusBadRequest,
 			"Invalid Request",
@@ -105,7 +106,7 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.RefreshToken == "" {
-		writeProblem(
+		httpx.WriteProblem(
 			w,
 			http.StatusBadRequest,
 			"Invalid Request",
@@ -117,7 +118,7 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	tokens, err := h.authService.Refresh(r.Context(), req.RefreshToken)
 	if err != nil {
 		if errors.Is(err, service.ErrInvalidRefreshToken) {
-			writeProblem(
+			httpx.WriteProblem(
 				w,
 				http.StatusUnauthorized,
 				"Invalid Refresh Token",
@@ -126,7 +127,7 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		writeProblem(
+		httpx.WriteProblem(
 			w,
 			http.StatusInternalServerError,
 			"Internal Server Error",
@@ -146,7 +147,7 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	var req logoutRequest
 	if err := decodeJSON(w, r, &req); err != nil {
-		writeProblem(
+		httpx.WriteProblem(
 			w,
 			http.StatusBadRequest,
 			"Invalid Request",
@@ -156,7 +157,7 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.RefreshToken == "" {
-		writeProblem(
+		httpx.WriteProblem(
 			w,
 			http.StatusBadRequest,
 			"Invalid Request",
@@ -166,7 +167,7 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.authService.Logout(r.Context(), req.RefreshToken); err != nil {
-		writeProblem(
+		httpx.WriteProblem(
 			w,
 			http.StatusInternalServerError,
 			"Internal Server Error",
