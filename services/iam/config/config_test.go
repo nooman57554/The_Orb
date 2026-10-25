@@ -352,8 +352,8 @@ func TestLoad_UnusableKeyPaths(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error when private key path is directory, got nil")
 		}
-		if !strings.Contains(err.Error(), "path is a directory") {
-			t.Errorf("expected directory error, got: %v", err)
+		if !strings.Contains(err.Error(), "path is not a regular file") {
+			t.Errorf("expected not a regular file error, got: %v", err)
 		}
 	})
 
@@ -390,12 +390,20 @@ func TestRedactDatabaseURL(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    string
+		password string
 		expected string
 	}{
 		{
 			name:     "url with password",
 			input:    "postgres://admin:super_secret_password@10.0.0.1:5432/mydb?sslmode=disable",
+			password: "super_secret_password",
 			expected: "postgres://admin:REDACTED@10.0.0.1:5432/mydb?sslmode=disable",
+		},
+		{
+			name:     "postgresql url with password",
+			input:    "postgresql://app_user:another_secret_pass@localhost:5432/orb",
+			password: "another_secret_pass",
+			expected: "postgresql://app_user:REDACTED@localhost:5432/orb",
 		},
 		{
 			name:     "url without password",
@@ -403,9 +411,76 @@ func TestRedactDatabaseURL(t *testing.T) {
 			expected: "postgres://localhost:5432/mydb",
 		},
 		{
+			name:     "url with user but no password",
+			input:    "postgres://admin@localhost:5432/mydb",
+			expected: "postgres://admin@localhost:5432/mydb",
+		},
+		{
 			name:     "empty url",
 			input:    "",
 			expected: "",
+		},
+		{
+			name:     "whitespace url",
+			input:    "   ",
+			expected: "",
+		},
+		{
+			name:     "malformed url with postgres scheme",
+			input:    "postgres://admin:secret@[::1:invalid/mydb",
+			password: "secret",
+			expected: "[redacted-database-url]",
+		},
+		{
+			name:     "dsn unquoted password",
+			input:    "host=localhost port=5432 user=orb password=super_secret_password dbname=orb_control sslmode=disable",
+			password: "super_secret_password",
+			expected: "host=localhost port=5432 user=orb password=REDACTED dbname=orb_control sslmode=disable",
+		},
+		{
+			name:     "dsn single quoted password with spaces",
+			input:    "host=localhost port=5432 user=orb password='secret with spaces' dbname=orb_control",
+			password: "secret with spaces",
+			expected: "host=localhost port=5432 user=orb password=REDACTED dbname=orb_control",
+		},
+		{
+			name:     "dsn single quoted password with escaped quote",
+			input:    `host=localhost port=5432 user=orb password='sec\'ret' dbname=orb_control`,
+			password: "sec'ret",
+			expected: "host=localhost port=5432 user=orb password=REDACTED dbname=orb_control",
+		},
+		{
+			name:     "dsn double quoted password",
+			input:    `host=localhost port=5432 user=orb password="double_secret_pass" dbname=orb_control`,
+			password: "double_secret_pass",
+			expected: "host=localhost port=5432 user=orb password=REDACTED dbname=orb_control",
+		},
+		{
+			name:     "dsn spaces around equals",
+			input:    "host=localhost port=5432 user=orb password = 'spaced_pass' dbname=orb_control",
+			password: "spaced_pass",
+			expected: "host=localhost port=5432 user=orb password = REDACTED dbname=orb_control",
+		},
+		{
+			name:     "dsn without password",
+			input:    "host=localhost port=5432 user=orb dbname=orb_control",
+			expected: "host=localhost port=5432 user=orb dbname=orb_control",
+		},
+		{
+			name:     "dsn empty password",
+			input:    "host=localhost port=5432 user=orb password='' dbname=orb_control",
+			expected: "host=localhost port=5432 user=orb password=REDACTED dbname=orb_control",
+		},
+		{
+			name:     "dsn password matches other attribute value",
+			input:    "host=localhost user=secret password=secret dbname=orb_control",
+			password: "secret",
+			expected: "[redacted-database-dsn]",
+		},
+		{
+			name:     "dsn invalid format",
+			input:    "not a valid dsn format = = =",
+			expected: "[redacted-database-connstring]",
 		},
 	}
 
@@ -415,8 +490,106 @@ func TestRedactDatabaseURL(t *testing.T) {
 			if got != tt.expected {
 				t.Errorf("RedactDatabaseURL(%q) = %q, want %q", tt.input, got, tt.expected)
 			}
-			if strings.Contains(got, "super_secret_password") {
-				t.Errorf("Redacted URL leaked password: %s", got)
+			if tt.password != "" && strings.Contains(got, tt.password) {
+				t.Errorf("Redacted URL leaked password %q: %s", tt.password, got)
+			}
+		})
+	}
+}
+
+func TestLoad_HTTPAddressValidation(t *testing.T) {
+	validTests := []struct {
+		name     string
+		addr     string
+		wantAddr string
+	}{
+		{"port only with colon", ":8080", ":8080"},
+		{"port only without colon", "8080", ":8080"},
+		{"ipv4 with port", "127.0.0.1:8080", "127.0.0.1:8080"},
+		{"ipv4 all interfaces", "0.0.0.0:3000", "0.0.0.0:3000"},
+		{"localhost with port", "localhost:8080", "localhost:8080"},
+		{"bracketed ipv6 with port", "[::1]:8080", "[::1]:8080"},
+		{"bracketed ipv6 full with port", "[2001:db8::1]:9090", "[2001:db8::1]:9090"},
+	}
+
+	for _, tt := range validTests {
+		t.Run("valid_"+tt.name, func(t *testing.T) {
+			env := setupValidEnvironment(t)
+			env["ORB_IAM_HTTP_ADDR"] = tt.addr
+
+			cfg, err := config.LoadFromLookup(lookupFromMap(env))
+			if err != nil {
+				t.Fatalf("expected addr %q to be valid, got: %v", tt.addr, err)
+			}
+			if cfg.HTTPAddr != tt.wantAddr {
+				t.Errorf("HTTPAddr = %q, want %q", cfg.HTTPAddr, tt.wantAddr)
+			}
+		})
+	}
+
+	invalidTests := []struct {
+		name          string
+		addr          string
+		wantErrSubstr string
+	}{
+		{"missing port localhost", "localhost", "ORB_IAM_HTTP_ADDR is invalid"},
+		{"missing port ipv4", "127.0.0.1", "ORB_IAM_HTTP_ADDR is invalid"},
+		{"missing port bracketed ipv6", "[::1]", "ORB_IAM_HTTP_ADDR is invalid"},
+		{"unbracketed ipv6", "::1", "ORB_IAM_HTTP_ADDR is invalid"},
+		{"extra colons", "127.0.0.1:8080:9090", "ORB_IAM_HTTP_ADDR is invalid"},
+		{"non numeric port", "localhost:port", "ORB_IAM_HTTP_ADDR port must be between 1 and 65535"},
+		{"port zero", ":0", "ORB_IAM_HTTP_ADDR port must be between 1 and 65535"},
+		{"port negative", ":-1", "ORB_IAM_HTTP_ADDR port must be between 1 and 65535"},
+		{"port 65536", ":65536", "ORB_IAM_HTTP_ADDR port must be between 1 and 65535"},
+		{"port 99999", ":99999", "ORB_IAM_HTTP_ADDR port must be between 1 and 65535"},
+	}
+
+	for _, tt := range invalidTests {
+		t.Run("invalid_"+tt.name, func(t *testing.T) {
+			env := setupValidEnvironment(t)
+			env["ORB_IAM_HTTP_ADDR"] = tt.addr
+
+			_, err := config.LoadFromLookup(lookupFromMap(env))
+			if err == nil {
+				t.Fatalf("expected addr %q to fail, got nil", tt.addr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErrSubstr) {
+				t.Errorf("error %q should contain %q", err.Error(), tt.wantErrSubstr)
+			}
+		})
+	}
+}
+
+func TestLoad_DatabaseConnectionFormats(t *testing.T) {
+	tests := []struct {
+		name  string
+		dbURL string
+	}{
+		{
+			name:  "standard postgres url",
+			dbURL: "postgres://user:secret@localhost:5432/orb_db?sslmode=disable",
+		},
+		{
+			name:  "postgresql scheme url",
+			dbURL: "postgresql://user:secret@localhost:5432/orb_db?sslmode=disable",
+		},
+		{
+			name:  "keyword value DSN",
+			dbURL: "host=localhost port=5432 user=orb password=secret dbname=orb_control sslmode=disable",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := setupValidEnvironment(t)
+			env["ORB_IAM_DATABASE_URL"] = tt.dbURL
+
+			cfg, err := config.LoadFromLookup(lookupFromMap(env))
+			if err != nil {
+				t.Fatalf("expected valid database connstring to load, got: %v", err)
+			}
+			if cfg.DatabaseURL != tt.dbURL {
+				t.Errorf("DatabaseURL = %q, want %q", cfg.DatabaseURL, tt.dbURL)
 			}
 		})
 	}

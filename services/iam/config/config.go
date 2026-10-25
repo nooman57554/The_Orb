@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -23,6 +24,10 @@ type Config struct {
 	HTTPIdleTimeout  time.Duration
 
 	// Database settings
+	// DatabaseURL is the PostgreSQL connection string. Both URL format
+	// (e.g. postgres://user:pass@host:port/dbname?sslmode=disable) and keyword/value
+	// DSN format (e.g. host=localhost port=5432 user=orb password=pass dbname=orb_control)
+	// accepted by pgxpool.ParseConfig and the shared dbconnector are supported.
 	DatabaseURL       string
 	DBMaxConns        int32
 	DBMinConns        int32
@@ -57,21 +62,43 @@ func (c Config) RedactedDatabaseURL() string {
 	return RedactDatabaseURL(c.DatabaseURL)
 }
 
-// RedactDatabaseURL masks the password in a connection string URL, safe for logging.
+var dsnPasswordRegex = regexp.MustCompile(`(?i)\b(password\s*=\s*)(?:'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|\S+)`)
+
+// RedactDatabaseURL masks the password in a connection string (URL or keyword/value DSN), safe for logging.
 func RedactDatabaseURL(rawURL string) string {
-	if strings.TrimSpace(rawURL) == "" {
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
 		return ""
 	}
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return "[redacted-database-url]"
-	}
-	if u.User != nil {
-		if _, hasPass := u.User.Password(); hasPass {
-			u.User = url.UserPassword(u.User.Username(), "REDACTED")
+
+	// 1. If it has a URL scheme (postgres:// or postgresql://), use URL-based redaction.
+	lower := strings.ToLower(trimmed)
+	if strings.HasPrefix(lower, "postgres://") || strings.HasPrefix(lower, "postgresql://") {
+		u, err := url.Parse(trimmed)
+		if err != nil {
+			return "[redacted-database-url]"
 		}
+		if u.User != nil {
+			if _, hasPass := u.User.Password(); hasPass {
+				u.User = url.UserPassword(u.User.Username(), "REDACTED")
+			}
+		}
+		return u.String()
 	}
-	return u.String()
+
+	// 2. Keyword/value DSN format (e.g. host=localhost port=5432 user=orb password=secret dbname=orb_control)
+	parsedCfg, parseErr := pgxpool.ParseConfig(trimmed)
+	if parseErr != nil {
+		return "[redacted-database-connstring]"
+	}
+
+	redacted := dsnPasswordRegex.ReplaceAllString(trimmed, "${1}REDACTED")
+	// If the actual parsed password is still present anywhere in the result, fall back to safe placeholder
+	if parsedCfg.ConnConfig.Password != "" && strings.Contains(redacted, parsedCfg.ConnConfig.Password) {
+		return "[redacted-database-dsn]"
+	}
+
+	return redacted
 }
 
 // Load reads and validates configuration from the environment using os.Getenv.
@@ -197,8 +224,8 @@ func LoadFromLookup(lookup func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("ORB_IAM_JWT_PRIVATE_KEY_PATH is unusable: %w", err)
 	}
-	if privFi.IsDir() {
-		return Config{}, fmt.Errorf("ORB_IAM_JWT_PRIVATE_KEY_PATH is unusable: path is a directory, expected a file")
+	if !privFi.Mode().IsRegular() {
+		return Config{}, fmt.Errorf("ORB_IAM_JWT_PRIVATE_KEY_PATH is unusable: path is not a regular file")
 	}
 
 	pubKeysDir := strings.TrimSpace(lookup("ORB_IAM_JWT_PUBLIC_KEYS_DIR"))
