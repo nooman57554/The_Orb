@@ -39,8 +39,6 @@ type TokenPair struct {
 	TokenType    string
 }
 
-const defaultReuseGracePeriod = 15 * time.Second
-
 type AuthService struct {
 	userRepo         repository.UserRepository
 	sessionRepo      repository.SessionRepository
