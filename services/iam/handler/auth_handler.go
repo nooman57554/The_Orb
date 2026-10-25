@@ -143,7 +143,7 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok || !principal.IsValid() {
+	if !ok {
 		httpx.WriteProblem(
 			w,
 			http.StatusUnauthorized,

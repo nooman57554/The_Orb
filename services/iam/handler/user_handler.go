@@ -141,7 +141,7 @@ func (h *UserHandler) GetUser(
 	r *http.Request,
 ) {
 	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok || principal == nil || principal.UserID == uuid.Nil {
+	if !ok {
 		httpx.WriteProblem(
 			w,
 			http.StatusUnauthorized,

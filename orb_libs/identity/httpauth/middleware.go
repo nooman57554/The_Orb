@@ -100,7 +100,7 @@ func (m *BearerMiddleware) Require(next http.Handler) http.Handler {
 			if strings.HasPrefix(authHeader, "Bearer ") {
 				parts := strings.Split(authHeader, " ")
 				if len(parts) == 2 && parts[0] == "Bearer" && parts[1] != "" && !strings.ContainsAny(parts[1], " \t\r\n") {
-					if principal, err := m.verifier.VerifyAccessToken(parts[1]); err == nil && principal != nil && principal.IsValid() {
+					if principal, err := m.verifier.VerifyAccessToken(parts[1]); err == nil {
 						r = r.WithContext(identity.WithPrincipal(r.Context(), principal))
 					}
 				}
