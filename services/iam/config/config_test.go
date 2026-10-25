@@ -27,23 +27,24 @@ func setupValidEnvironment(t *testing.T) map[string]string {
 	}
 
 	return map[string]string{
-		"ORB_IAM_HTTP_ADDR":             ":8080",
-		"ORB_IAM_HTTP_READ_TIMEOUT":     "10s",
-		"ORB_IAM_HTTP_WRITE_TIMEOUT":    "10s",
-		"ORB_IAM_HTTP_IDLE_TIMEOUT":     "30s",
-		"ORB_IAM_DATABASE_URL":          "postgres://user:secret@localhost:5432/orb_db?sslmode=disable",
-		"ORB_IAM_DB_MAX_CONNS":          "20",
-		"ORB_IAM_DB_MIN_CONNS":          "5",
-		"ORB_IAM_DB_MAX_CONN_LIFETIME":  "1h",
-		"ORB_IAM_DB_MAX_CONN_IDLE_TIME": "10m",
-		"ORB_IAM_DB_HEALTH_CHECK_TIME":  "2m",
-		"ORB_IAM_JWT_PRIVATE_KEY_PATH":  privKeyPath,
-		"ORB_IAM_JWT_PUBLIC_KEYS_DIR":   pubKeysDir,
-		"ORB_IAM_JWT_ACTIVE_KEY_ID":     "key-2026-01",
-		"ORB_IAM_JWT_ISSUER":            "orb-iam",
-		"ORB_IAM_JWT_AUDIENCE":          "orb-platform",
-		"ORB_IAM_JWT_TTL":               "15m",
-		"ORB_IAM_REFRESH_TOKEN_TTL":     "168h",
+		"ORB_IAM_HTTP_ADDR":                  ":8080",
+		"ORB_IAM_HTTP_READ_TIMEOUT":          "10s",
+		"ORB_IAM_HTTP_WRITE_TIMEOUT":         "10s",
+		"ORB_IAM_HTTP_IDLE_TIMEOUT":          "30s",
+		"ORB_IAM_DATABASE_URL":               "postgres://user:secret@localhost:5432/orb_db?sslmode=disable",
+		"ORB_IAM_DB_MAX_CONNS":               "20",
+		"ORB_IAM_DB_MIN_CONNS":               "5",
+		"ORB_IAM_DB_MAX_CONN_LIFETIME":       "1h",
+		"ORB_IAM_DB_MAX_CONN_IDLE_TIME":      "10m",
+		"ORB_IAM_DB_HEALTH_CHECK_TIME":       "2m",
+		"ORB_IAM_JWT_PRIVATE_KEY_PATH":       privKeyPath,
+		"ORB_IAM_JWT_PUBLIC_KEYS_DIR":        pubKeysDir,
+		"ORB_IAM_JWT_ACTIVE_KEY_ID":          "key-2026-01",
+		"ORB_IAM_JWT_ISSUER":                 "orb-iam",
+		"ORB_IAM_JWT_AUDIENCE":               "orb-platform",
+		"ORB_IAM_JWT_TTL":                    "15m",
+		"ORB_IAM_REFRESH_TOKEN_TTL":          "168h",
+		"ORB_IAM_REFRESH_REUSE_GRACE_PERIOD": "30s",
 	}
 }
 
@@ -106,6 +107,9 @@ func TestLoad_ValidFullConfig(t *testing.T) {
 	if cfg.RefreshTokenTTL != 168*time.Hour {
 		t.Errorf("RefreshTokenTTL = %v, want 168h", cfg.RefreshTokenTTL)
 	}
+	if cfg.RefreshReuseGracePeriod != 30*time.Second {
+		t.Errorf("RefreshReuseGracePeriod = %v, want 30s", cfg.RefreshReuseGracePeriod)
+	}
 
 	// Verify DatabaseConfig() helper
 	dbCfg := cfg.DatabaseConfig()
@@ -165,6 +169,9 @@ func TestLoad_ValidDefaults(t *testing.T) {
 	}
 	if cfg.RefreshTokenTTL != 720*time.Hour {
 		t.Errorf("default RefreshTokenTTL = %v, want 720h", cfg.RefreshTokenTTL)
+	}
+	if cfg.RefreshReuseGracePeriod != 15*time.Second {
+		t.Errorf("default RefreshReuseGracePeriod = %v, want 15s", cfg.RefreshReuseGracePeriod)
 	}
 }
 
@@ -282,6 +289,27 @@ func TestLoad_MalformedValues(t *testing.T) {
 				env["ORB_IAM_REFRESH_TOKEN_TTL"] = "0s"
 			},
 			wantErrSubstr: "ORB_IAM_REFRESH_TOKEN_TTL must be a positive duration",
+		},
+		{
+			name: "malformed refresh reuse grace period zero",
+			modifyEnv: func(env map[string]string) {
+				env["ORB_IAM_REFRESH_REUSE_GRACE_PERIOD"] = "0s"
+			},
+			wantErrSubstr: "ORB_IAM_REFRESH_REUSE_GRACE_PERIOD must be a positive duration",
+		},
+		{
+			name: "negative refresh reuse grace period",
+			modifyEnv: func(env map[string]string) {
+				env["ORB_IAM_REFRESH_REUSE_GRACE_PERIOD"] = "-10s"
+			},
+			wantErrSubstr: "ORB_IAM_REFRESH_REUSE_GRACE_PERIOD must be a positive duration",
+		},
+		{
+			name: "invalid refresh reuse grace period format",
+			modifyEnv: func(env map[string]string) {
+				env["ORB_IAM_REFRESH_REUSE_GRACE_PERIOD"] = "invalid-period"
+			},
+			wantErrSubstr: "ORB_IAM_REFRESH_REUSE_GRACE_PERIOD must be a positive duration",
 		},
 		{
 			name: "db max conns zero",

@@ -5,8 +5,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -34,6 +37,8 @@ type mockSessionRepository struct {
 	userRepo            repository.UserRepository
 	forceRevokeError    bool
 	forceGetError       bool
+	forceRotateNotFound bool
+	forceGetPrevError   bool
 }
 
 func newMockSessionRepository(userRepo repository.UserRepository) *mockSessionRepository {
@@ -78,7 +83,7 @@ func (m *mockSessionRepository) GetByPreviousTokenHash(ctx context.Context, toke
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	if m.forceGetError {
+	if m.forceGetError || m.forceGetPrevError {
 		return nil, errors.New("database connection failure")
 	}
 
@@ -93,6 +98,10 @@ func (m *mockSessionRepository) GetByPreviousTokenHash(ctx context.Context, toke
 func (m *mockSessionRepository) RotateRefreshToken(ctx context.Context, oldTokenHash, newTokenHash string) (*model.Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if m.forceRotateNotFound {
+		return nil, repository.ErrNotFound
+	}
 
 	s, ok := m.sessionsByTokenHash[oldTokenHash]
 	if !ok || s.RevokedAt != nil || time.Now().After(s.ExpiresAt) {
@@ -214,6 +223,10 @@ func (m *mockUserRepositoryWithDBErrors) GetByEmail(ctx context.Context, email s
 }
 
 func setupAuthFixture(t *testing.T) *authTestFixture {
+	return setupAuthFixtureWithGracePeriod(t, 15*time.Second)
+}
+
+func setupAuthFixtureWithGracePeriod(t *testing.T, gracePeriod time.Duration) *authTestFixture {
 	t.Helper()
 
 	userRepo := &mockUserRepositoryWithDBErrors{
@@ -244,6 +257,7 @@ func setupAuthFixture(t *testing.T) *authTestFixture {
 		jwtManager,
 		15*time.Minute,
 		24*time.Hour,
+		gracePeriod,
 	)
 	if err != nil {
 		t.Fatalf("create auth service: %v", err)
@@ -894,10 +908,58 @@ func TestAuthHandler_Refresh_InvalidAndExpiredTokens(t *testing.T) {
 	}
 }
 
+func TestAuthService_NewAuthService_GracePeriodValidation(t *testing.T) {
+	userRepo := &mockUserRepositoryWithDBErrors{
+		mockUserRepository: *newMockUserRepository(),
+	}
+	sessionRepo := newMockSessionRepository(userRepo)
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	jwtManager, _ := auth.NewJWTManager(priv, "k1", "orb-iam", "orb-platform", 15*time.Minute)
+
+	tests := []struct {
+		name        string
+		gracePeriod time.Duration
+		wantErr     bool
+	}{
+		{
+			name:        "zero grace period rejected",
+			gracePeriod: 0,
+			wantErr:     true,
+		},
+		{
+			name:        "negative grace period rejected",
+			gracePeriod: -5 * time.Second,
+			wantErr:     true,
+		},
+		{
+			name:        "positive grace period accepted",
+			gracePeriod: 15 * time.Second,
+			wantErr:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := service.NewAuthService(
+				userRepo,
+				sessionRepo,
+				jwtManager,
+				15*time.Minute,
+				24*time.Hour,
+				tt.gracePeriod,
+			)
+			if tt.wantErr && err == nil {
+				t.Fatalf("expected error for grace period %v, got nil", tt.gracePeriod)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("unexpected error for grace period %v: %v", tt.gracePeriod, err)
+			}
+		})
+	}
+}
+
 func TestAuthHandler_Refresh_ReuseOfPreviouslyRotatedToken_RevokesSession(t *testing.T) {
 	f := setupAuthFixture(t)
-	// Disable grace period to simulate reuse outside grace window
-	f.authService.SetReuseGracePeriod(0)
 
 	userService := service.NewUserService(f.userRepo)
 	_, _ = userService.CreateUser(context.Background(), service.CreateUserInput{
@@ -929,7 +991,17 @@ func TestAuthHandler_Refresh_ReuseOfPreviouslyRotatedToken_RevokesSession(t *tes
 	}
 	_ = json.NewDecoder(rec1.Body).Decode(&tokens2)
 
-	// 2. Attacker replays RT1 (previously rotated token)
+	// Artificially backdate RotatedAt on the session so the reuse attempt falls outside the grace period
+	f.sessionRepo.mu.Lock()
+	past := time.Now().Add(-1 * time.Minute)
+	for _, s := range f.sessionRepo.sessionsByID {
+		if s.RotatedAt != nil {
+			s.RotatedAt = &past
+		}
+	}
+	f.sessionRepo.mu.Unlock()
+
+	// 2. Attacker replays RT1 (previously rotated token outside grace window)
 	bodyReplay, _ := json.Marshal(map[string]string{"refresh_token": tokens1.RefreshToken})
 	reqReplay := httptest.NewRequest(http.MethodPost, "/v1/auth/refresh", bytes.NewReader(bodyReplay))
 	recReplay := httptest.NewRecorder()
@@ -967,9 +1039,8 @@ func TestAuthHandler_Refresh_ReuseOfPreviouslyRotatedToken_RevokesSession(t *tes
 }
 
 func TestAuthHandler_Refresh_ConcurrentRefresh_OneWins_LosingDoesNotRevoke(t *testing.T) {
+	// 15s default grace period handles in-flight concurrent races
 	f := setupAuthFixture(t)
-	// Set 15s grace period for in-flight races
-	f.authService.SetReuseGracePeriod(15 * time.Second)
 
 	userService := service.NewUserService(f.userRepo)
 	_, _ = userService.CreateUser(context.Background(), service.CreateUserInput{
@@ -1043,6 +1114,115 @@ func TestAuthHandler_Refresh_ConcurrentRefresh_OneWins_LosingDoesNotRevoke(t *te
 	}
 }
 
+func TestAuthHandler_Refresh_ConcurrentRace_DatabaseFailure_Returns500(t *testing.T) {
+	f := setupAuthFixture(t)
+	userService := service.NewUserService(f.userRepo)
+	_, _ = userService.CreateUser(context.Background(), service.CreateUserInput{
+		Email:    "concurrent_db_err@example.com",
+		Password: "Password123!",
+	})
+
+	tokens, err := f.authService.Login(context.Background(), service.LoginInput{
+		Email:    "concurrent_db_err@example.com",
+		Password: "Password123!",
+	})
+	if err != nil {
+		t.Fatalf("login failed: %v", err)
+	}
+
+	// Simulate concurrency race:
+	// Initial lookup GetByRefreshTokenHash succeeds.
+	// RotateRefreshToken returns repository.ErrNotFound (another request won the race).
+	// Subsequent GetByPreviousTokenHash fails with a database error.
+	f.sessionRepo.mu.Lock()
+	f.sessionRepo.forceRotateNotFound = true
+	f.sessionRepo.forceGetPrevError = true
+	f.sessionRepo.mu.Unlock()
+
+	body, _ := json.Marshal(map[string]string{
+		"refresh_token": tokens.RefreshToken,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/auth/refresh", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	f.appHandler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 Internal Server Error when GetByPreviousTokenHash fails after concurrent rotation, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var prob httpx.ProblemDetails
+	if err := json.NewDecoder(rec.Body).Decode(&prob); err != nil {
+		t.Fatalf("failed to decode problem: %v", err)
+	}
+	if prob.Detail == "database connection failure" {
+		t.Error("internal database error message leaked to client")
+	}
+}
+
+func TestAuthHandler_Refresh_ConcurrentRace_NotFoundInPrevious_Returns401(t *testing.T) {
+	f := setupAuthFixture(t)
+	userService := service.NewUserService(f.userRepo)
+	_, _ = userService.CreateUser(context.Background(), service.CreateUserInput{
+		Email:    "concurrent_notfound@example.com",
+		Password: "Password123!",
+	})
+
+	tokens, err := f.authService.Login(context.Background(), service.LoginInput{
+		Email:    "concurrent_notfound@example.com",
+		Password: "Password123!",
+	})
+	if err != nil {
+		t.Fatalf("login failed: %v", err)
+	}
+
+	// Simulate concurrency race where RotateRefreshToken returns ErrNotFound,
+	// and GetByPreviousTokenHash also returns repository.ErrNotFound.
+	f.sessionRepo.mu.Lock()
+	f.sessionRepo.forceRotateNotFound = true
+	f.sessionRepo.forceGetPrevError = false
+	f.sessionRepo.mu.Unlock()
+
+	body, _ := json.Marshal(map[string]string{
+		"refresh_token": tokens.RefreshToken,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/auth/refresh", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	f.appHandler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 Unauthorized when GetByPreviousTokenHash returns ErrNotFound after concurrent rotation, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAuthHandler_Refresh_InitialLookupNotFound_PreviousTokenDBError_Returns500(t *testing.T) {
+	f := setupAuthFixture(t)
+
+	// Simulate initial lookup returning ErrNotFound (token not active),
+	// followed by GetByPreviousTokenHash failing with a database error.
+	f.sessionRepo.mu.Lock()
+	f.sessionRepo.forceGetPrevError = true
+	f.sessionRepo.mu.Unlock()
+
+	body, _ := json.Marshal(map[string]string{
+		"refresh_token": "random_inactive_refresh_token_xyz",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/auth/refresh", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	f.appHandler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 Internal Server Error when GetByPreviousTokenHash fails on inactive token check, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var prob httpx.ProblemDetails
+	if err := json.NewDecoder(rec.Body).Decode(&prob); err != nil {
+		t.Fatalf("failed to decode problem: %v", err)
+	}
+	if prob.Detail == "database connection failure" {
+		t.Error("internal database error message leaked to client")
+	}
+}
+
 func TestAuthHandler_Refresh_DatabaseFailure_Returns500(t *testing.T) {
 	f := setupAuthFixture(t)
 	userService := service.NewUserService(f.userRepo)
@@ -1080,19 +1260,88 @@ func TestAuthHandler_Refresh_DatabaseFailure_Returns500(t *testing.T) {
 }
 
 func TestAuthHandler_Refresh_NoRawTokenInLogsOrResponse(t *testing.T) {
-	f := setupAuthFixture(t)
-	f.authService.SetReuseGracePeriod(0)
-
-	rawSecretToken := "super_secret_raw_refresh_token_xyz987"
-	body, _ := json.Marshal(map[string]string{
-		"refresh_token": rawSecretToken,
+	// Capture logger output and restore global logger state after test
+	var logBuf bytes.Buffer
+	oldWriter := log.Writer()
+	oldFlags := log.Flags()
+	log.SetOutput(&logBuf)
+	t.Cleanup(func() {
+		log.SetOutput(oldWriter)
+		log.SetFlags(oldFlags)
 	})
-	req := httptest.NewRequest(http.MethodPost, "/v1/auth/refresh", bytes.NewReader(body))
-	rec := httptest.NewRecorder()
-	f.appHandler.ServeHTTP(rec, req)
 
-	responseBody := rec.Body.String()
+	f := setupAuthFixture(t)
+
+	userService := service.NewUserService(f.userRepo)
+	_, err := userService.CreateUser(context.Background(), service.CreateUserInput{
+		Email:    "secrecy_user@example.com",
+		Password: "Password123!",
+	})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	tokens1, err := f.authService.Login(context.Background(), service.LoginInput{
+		Email:    "secrecy_user@example.com",
+		Password: "Password123!",
+	})
+	if err != nil {
+		t.Fatalf("login failed: %v", err)
+	}
+
+	rawSecretToken := tokens1.RefreshToken
+	sum := sha256.Sum256([]byte(rawSecretToken))
+	sha256Hash := hex.EncodeToString(sum[:])
+
+	// Legitimate rotation RT1 -> RT2
+	body1, _ := json.Marshal(map[string]string{"refresh_token": rawSecretToken})
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/auth/refresh", bytes.NewReader(body1))
+	rec1 := httptest.NewRecorder()
+	f.appHandler.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("expected 200 on initial rotation, got %d: %s", rec1.Code, rec1.Body.String())
+	}
+
+	// Backdate RotatedAt so the token reuse attempt falls outside the grace period
+	f.sessionRepo.mu.Lock()
+	past := time.Now().Add(-1 * time.Minute)
+	for _, s := range f.sessionRepo.sessionsByID {
+		if s.RotatedAt != nil {
+			s.RotatedAt = &past
+		}
+	}
+	f.sessionRepo.mu.Unlock()
+
+	// Replay old refresh token (RT1) -> triggers token reuse detection and security log
+	bodyReplay, _ := json.Marshal(map[string]string{"refresh_token": rawSecretToken})
+	reqReplay := httptest.NewRequest(http.MethodPost, "/v1/auth/refresh", bytes.NewReader(bodyReplay))
+	recReplay := httptest.NewRecorder()
+	f.appHandler.ServeHTTP(recReplay, reqReplay)
+
+	if recReplay.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized on reuse, got %d", recReplay.Code)
+	}
+
+	logOutput := logBuf.String()
+	// Verify that the security event was logged
+	if !strings.Contains(logOutput, "SECURITY: refresh token reuse detected for session") {
+		t.Errorf("expected security log message to be emitted, got: %q", logOutput)
+	}
+
+	// Secrecy assertions for logs
+	if strings.Contains(logOutput, rawSecretToken) {
+		t.Errorf("raw secret refresh token leaked in logger output: %s", logOutput)
+	}
+	if strings.Contains(logOutput, sha256Hash) {
+		t.Errorf("SHA-256 hash of refresh token leaked in logger output: %s", logOutput)
+	}
+
+	// Secrecy assertions for client HTTP response
+	responseBody := recReplay.Body.String()
 	if strings.Contains(responseBody, rawSecretToken) {
-		t.Errorf("raw secret refresh token was leaked in response body: %s", responseBody)
+		t.Errorf("raw secret refresh token leaked in response body: %s", responseBody)
+	}
+	if strings.Contains(responseBody, sha256Hash) {
+		t.Errorf("SHA-256 hash of refresh token leaked in response body: %s", responseBody)
 	}
 }

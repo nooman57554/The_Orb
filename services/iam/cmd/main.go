@@ -51,6 +51,7 @@ func main() {
 		jwtManager,
 		cfg.JWTTTL,
 		cfg.RefreshTokenTTL,
+		cfg.RefreshReuseGracePeriod,
 	)
 	if err != nil {
 		log.Fatalf("initialize auth service: %v", err)

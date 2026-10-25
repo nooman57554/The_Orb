@@ -36,13 +36,14 @@ type Config struct {
 	DBHealthCheckTime time.Duration
 
 	// JWT and session settings
-	JWTPrivateKeyPath string
-	JWTPublicKeysDir  string
-	JWTKeyID          string
-	JWTIssuer         string
-	JWTAudience       string
-	JWTTTL            time.Duration
-	RefreshTokenTTL   time.Duration
+	JWTPrivateKeyPath       string
+	JWTPublicKeysDir        string
+	JWTKeyID                string
+	JWTIssuer               string
+	JWTAudience             string
+	JWTTTL                  time.Duration
+	RefreshTokenTTL         time.Duration
+	RefreshReuseGracePeriod time.Duration
 }
 
 // DatabaseConfig converts Config into a dbconnector.Config for database pool creation.
@@ -339,6 +340,11 @@ func LoadFromLookup(lookup func(string) string) (Config, error) {
 		return Config{}, err
 	}
 
+	reuseGracePeriod, err := getDuration("ORB_IAM_REFRESH_REUSE_GRACE_PERIOD", 15*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		HTTPAddr:         httpAddr,
 		HTTPReadTimeout:  readTimeout,
@@ -352,13 +358,14 @@ func LoadFromLookup(lookup func(string) string) (Config, error) {
 		DBMaxConnIdleTime: dbMaxIdle,
 		DBHealthCheckTime: dbHealthCheck,
 
-		JWTPrivateKeyPath: privKeyPath,
-		JWTPublicKeysDir:  pubKeysDir,
-		JWTKeyID:          keyID,
-		JWTIssuer:         issuer,
-		JWTAudience:       audience,
-		JWTTTL:            jwtTTL,
-		RefreshTokenTTL:   refreshTTL,
+		JWTPrivateKeyPath:       privKeyPath,
+		JWTPublicKeysDir:        pubKeysDir,
+		JWTKeyID:                keyID,
+		JWTIssuer:               issuer,
+		JWTAudience:             audience,
+		JWTTTL:                  jwtTTL,
+		RefreshTokenTTL:         refreshTTL,
+		RefreshReuseGracePeriod: reuseGracePeriod,
 	}, nil
 }
 

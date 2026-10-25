@@ -56,12 +56,16 @@ func NewAuthService(
 	jwtManager *auth.JWTManager,
 	accessTokenTTL time.Duration,
 	refreshTokenTTL time.Duration,
+	reuseGracePeriod time.Duration,
 ) (*AuthService, error) {
 	if userRepo == nil || sessionRepo == nil || jwtManager == nil {
 		return nil, fmt.Errorf("auth service dependencies are required")
 	}
 	if accessTokenTTL <= 0 || refreshTokenTTL <= 0 {
 		return nil, fmt.Errorf("token lifetimes must be positive")
+	}
+	if reuseGracePeriod <= 0 {
+		return nil, fmt.Errorf("reuse grace period must be positive")
 	}
 
 	return &AuthService{
@@ -70,12 +74,8 @@ func NewAuthService(
 		jwtManager:       jwtManager,
 		accessTokenTTL:   accessTokenTTL,
 		refreshTokenTTL:  refreshTokenTTL,
-		reuseGracePeriod: defaultReuseGracePeriod,
+		reuseGracePeriod: reuseGracePeriod,
 	}, nil
-}
-
-func (s *AuthService) SetReuseGracePeriod(d time.Duration) {
-	s.reuseGracePeriod = d
 }
 
 func (s *AuthService) Login(
@@ -215,15 +215,20 @@ func (s *AuthService) Refresh(
 			// Another request rotated it first during this in-flight call.
 			// Verify if it is in previous_token_hash and check grace period.
 			reuseSession, reuseErr := s.sessionRepo.GetByPreviousTokenHash(ctx, oldHash)
-			if reuseErr == nil && reuseSession != nil {
-				if reuseSession.RotatedAt != nil && s.reuseGracePeriod > 0 && time.Since(*reuseSession.RotatedAt) <= s.reuseGracePeriod {
+			if reuseErr != nil {
+				if errors.Is(reuseErr, repository.ErrNotFound) {
 					return nil, ErrInvalidRefreshToken
 				}
-				if revokeErr := s.sessionRepo.Revoke(ctx, reuseSession.ID); revokeErr != nil {
-					return nil, fmt.Errorf("revoke session on token reuse: %w", revokeErr)
-				}
-				log.Printf("SECURITY: refresh token reuse detected for session %s; session revoked", reuseSession.ID)
+				return nil, fmt.Errorf("check token reuse after concurrent rotation: %w", reuseErr)
 			}
+
+			if reuseSession.RotatedAt != nil && s.reuseGracePeriod > 0 && time.Since(*reuseSession.RotatedAt) <= s.reuseGracePeriod {
+				return nil, ErrInvalidRefreshToken
+			}
+			if revokeErr := s.sessionRepo.Revoke(ctx, reuseSession.ID); revokeErr != nil {
+				return nil, fmt.Errorf("revoke session on token reuse: %w", revokeErr)
+			}
+			log.Printf("SECURITY: refresh token reuse detected for session %s; session revoked", reuseSession.ID)
 			return nil, ErrInvalidRefreshToken
 		}
 		return nil, fmt.Errorf("rotate refresh token: %w", err)
