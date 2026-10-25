@@ -8,11 +8,11 @@ import (
 	"time"
 
 	"github.com/nooman57554/The_Orb/orb_libs/dbconnector"
+	"github.com/nooman57554/The_Orb/orb_libs/identity/httpauth"
 	"github.com/nooman57554/The_Orb/services/iam/auth"
 	"github.com/nooman57554/The_Orb/services/iam/config"
 	"github.com/nooman57554/The_Orb/services/iam/handler"
 	"github.com/nooman57554/The_Orb/services/iam/keyloader"
-	"github.com/nooman57554/The_Orb/services/iam/middleware"
 	"github.com/nooman57554/The_Orb/services/iam/repository"
 	"github.com/nooman57554/The_Orb/services/iam/service"
 )
@@ -69,10 +69,16 @@ func main() {
 	userHandler := handler.NewUserHandler(userService)
 	authHandler := handler.NewAuthHandler(authService)
 
-	// create middleware
-	authMiddleware, err := middleware.NewAuthMiddleware(jwtManager, sessionRepo)
+	// create token verifier adapter
+	tokenVerifier, err := auth.NewJWTPrincipalVerifier(jwtManager)
 	if err != nil {
-		log.Fatalf("initialize auth middleware: %v", err)
+		log.Fatalf("initialize token verifier: %v", err)
+	}
+
+	// create bearer middleware
+	bearerMiddleware, err := httpauth.NewBearerMiddleware(tokenVerifier, sessionRepo)
+	if err != nil {
+		log.Fatalf("initialize bearer middleware: %v", err)
 	}
 
 	// Create router
@@ -80,7 +86,7 @@ func main() {
 
 	// User routes
 	mux.HandleFunc("POST /v1/users", userHandler.CreateUser)
-	mux.Handle("GET /v1/users/{id}", authMiddleware.RequireAuth(http.HandlerFunc(userHandler.GetUser)))
+	mux.Handle("GET /v1/users/{id}", bearerMiddleware.Require(http.HandlerFunc(userHandler.GetUser)))
 
 	// Auth routes
 	mux.HandleFunc("POST /v1/auth/login", authHandler.Login)

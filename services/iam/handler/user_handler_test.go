@@ -12,9 +12,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/nooman57554/The_Orb/orb_libs/identity"
+	"github.com/nooman57554/The_Orb/orb_libs/identity/httpauth"
 	"github.com/nooman57554/The_Orb/services/iam/auth"
 	"github.com/nooman57554/The_Orb/services/iam/handler"
-	"github.com/nooman57554/The_Orb/services/iam/middleware"
 	"github.com/nooman57554/The_Orb/services/iam/model"
 	"github.com/nooman57554/The_Orb/services/iam/repository"
 	"github.com/nooman57554/The_Orb/services/iam/service"
@@ -79,12 +80,12 @@ func (m *mockSessionChecker) IsActive(ctx context.Context, sessionID uuid.UUID) 
 }
 
 type handlerFixture struct {
-	userRepo       *mockUserRepository
-	userService    *service.UserService
-	userHandler    *handler.UserHandler
-	jwtManager     *auth.JWTManager
-	sessionChecker *mockSessionChecker
-	authMiddleware *middleware.AuthMiddleware
+	userRepo         *mockUserRepository
+	userService      *service.UserService
+	userHandler      *handler.UserHandler
+	jwtManager       *auth.JWTManager
+	sessionChecker   *mockSessionChecker
+	bearerMiddleware *httpauth.BearerMiddleware
 }
 
 func setupHandlerFixture(t *testing.T) *handlerFixture {
@@ -112,22 +113,27 @@ func setupHandlerFixture(t *testing.T) *handlerFixture {
 		t.Fatalf("create JWT manager: %v", err)
 	}
 
+	verifier, err := auth.NewJWTPrincipalVerifier(jwtManager)
+	if err != nil {
+		t.Fatalf("create principal verifier: %v", err)
+	}
+
 	sessionChecker := &mockSessionChecker{
 		activeSessions: make(map[uuid.UUID]bool),
 	}
 
-	authMiddleware, err := middleware.NewAuthMiddleware(jwtManager, sessionChecker)
+	bearerMiddleware, err := httpauth.NewBearerMiddleware(verifier, sessionChecker)
 	if err != nil {
-		t.Fatalf("create auth middleware: %v", err)
+		t.Fatalf("create bearer middleware: %v", err)
 	}
 
 	return &handlerFixture{
-		userRepo:       userRepo,
-		userService:    userService,
-		userHandler:    userHandler,
-		jwtManager:     jwtManager,
-		sessionChecker: sessionChecker,
-		authMiddleware: authMiddleware,
+		userRepo:         userRepo,
+		userService:      userService,
+		userHandler:      userHandler,
+		jwtManager:       jwtManager,
+		sessionChecker:   sessionChecker,
+		bearerMiddleware: bearerMiddleware,
 	}
 }
 
@@ -179,13 +185,13 @@ func TestUserHandler_GetUser_SelfLookup_Success(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/v1/users/"+userID.String(), nil)
 	req.SetPathValue("id", userID.String())
 
-	// Attach claims for self
-	claims := &auth.Claims{
+	// Attach principal for self
+	principal := &identity.Principal{
 		UserID:    userID,
 		SessionID: sessionID,
 		TokenID:   uuid.New(),
 	}
-	ctx := middleware.WithClaims(req.Context(), claims)
+	ctx := identity.WithPrincipal(req.Context(), principal)
 	req = req.WithContext(ctx)
 
 	rec := httptest.NewRecorder()
@@ -231,12 +237,12 @@ func TestUserHandler_GetUser_OtherUserLookup_Forbidden(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/v1/users/"+userB.ID.String(), nil)
 	req.SetPathValue("id", userB.ID.String())
 
-	claims := &auth.Claims{
+	principal := &identity.Principal{
 		UserID:    userA.ID,
 		SessionID: uuid.New(),
 		TokenID:   uuid.New(),
 	}
-	ctx := middleware.WithClaims(req.Context(), claims)
+	ctx := identity.WithPrincipal(req.Context(), principal)
 	req = req.WithContext(ctx)
 
 	rec := httptest.NewRecorder()
@@ -266,12 +272,12 @@ func TestUserHandler_GetUser_InvalidPathUUID_BadRequest(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/v1/users/not-a-valid-uuid", nil)
 	req.SetPathValue("id", "not-a-valid-uuid")
 
-	claims := &auth.Claims{
+	principal := &identity.Principal{
 		UserID:    userID,
 		SessionID: uuid.New(),
 		TokenID:   uuid.New(),
 	}
-	ctx := middleware.WithClaims(req.Context(), claims)
+	ctx := identity.WithPrincipal(req.Context(), principal)
 	req = req.WithContext(ctx)
 
 	rec := httptest.NewRecorder()
@@ -302,12 +308,12 @@ func TestUserHandler_GetUser_NonExistentUser_NotFound(t *testing.T) {
 	req.SetPathValue("id", nonExistentID.String())
 
 	// Authenticated self-lookup for a user that does not exist in repo
-	claims := &auth.Claims{
+	principal := &identity.Principal{
 		UserID:    nonExistentID,
 		SessionID: uuid.New(),
 		TokenID:   uuid.New(),
 	}
-	ctx := middleware.WithClaims(req.Context(), claims)
+	ctx := identity.WithPrincipal(req.Context(), principal)
 	req = req.WithContext(ctx)
 
 	rec := httptest.NewRecorder()
@@ -343,12 +349,12 @@ func TestUserHandler_GetUser_SpoofedHeaderIgnored(t *testing.T) {
 	req.SetPathValue("id", userB.ID.String())
 	req.Header.Set("X-User-ID", userB.ID.String())
 
-	claims := &auth.Claims{
+	principal := &identity.Principal{
 		UserID:    userA.ID,
 		SessionID: uuid.New(),
 		TokenID:   uuid.New(),
 	}
-	ctx := middleware.WithClaims(req.Context(), claims)
+	ctx := identity.WithPrincipal(req.Context(), principal)
 	req = req.WithContext(ctx)
 
 	rec := httptest.NewRecorder()
@@ -364,7 +370,7 @@ func TestFullRoute_ServeMux_Integration(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/users", f.userHandler.CreateUser)
-	mux.Handle("GET /v1/users/{id}", f.authMiddleware.RequireAuth(http.HandlerFunc(f.userHandler.GetUser)))
+	mux.Handle("GET /v1/users/{id}", f.bearerMiddleware.Require(http.HandlerFunc(f.userHandler.GetUser)))
 
 	userA := &model.User{ID: uuid.New(), Email: "user_a@example.com", Status: "active"}
 	userB := &model.User{ID: uuid.New(), Email: "user_b@example.com", Status: "active"}

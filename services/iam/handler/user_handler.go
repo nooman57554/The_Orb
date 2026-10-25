@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/nooman57554/The_Orb/services/iam/middleware"
+	"github.com/nooman57554/The_Orb/orb_libs/identity"
 	"github.com/nooman57554/The_Orb/services/iam/repository"
 	"github.com/nooman57554/The_Orb/services/iam/service"
 )
@@ -117,8 +117,8 @@ func (h *UserHandler) GetUser(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	claims, ok := middleware.ClaimsFromContext(r.Context())
-	if !ok || claims == nil || claims.UserID == uuid.Nil {
+	principal, ok := identity.PrincipalFromContext(r.Context())
+	if !ok || principal == nil || principal.UserID == uuid.Nil {
 		writeProblem(
 			w,
 			http.StatusUnauthorized,
@@ -139,7 +139,7 @@ func (h *UserHandler) GetUser(
 		return
 	}
 
-	if claims.UserID != userID {
+	if principal.UserID != userID {
 		writeProblem(
 			w,
 			http.StatusForbidden,
