@@ -105,7 +105,6 @@ func setupHandlerFixture(t *testing.T) *handlerFixture {
 	jwtManager, err := auth.NewJWTManager(
 		priv,
 		keyID,
-		map[string]ed25519.PublicKey{keyID: pub},
 		"orb-iam",
 		"orb-platform",
 		15*time.Minute,

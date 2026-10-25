@@ -127,7 +127,6 @@ func initAuth(cfg config.Config) (*auth.JWTManager, *jwtverify.Verifier, error) 
 	jwtManager, err := auth.NewJWTManager(
 		keySet.PrivateKey,
 		keySet.ActiveKeyID,
-		keySet.PublicKeys,
 		cfg.JWTIssuer,
 		cfg.JWTAudience,
 		cfg.JWTTTL,
