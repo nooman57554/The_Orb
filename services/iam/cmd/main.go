@@ -44,6 +44,9 @@ func main() {
 	sessionRepo := repository.NewPostgresSessionRepository(db)
 	authzRepo := repository.NewPostgresAuthorizationRepository(db)
 	tenantRepo := repository.NewPostgresTenantRepository(db)
+	roleRepo := repository.NewPostgresRoleRepository(db)
+	permRepo := repository.NewPostgresPermissionRepository(db)
+	roleAssignRepo := repository.NewPostgresRoleAssignmentRepository(db)
 
 	// create services
 	userService := service.NewUserService(userRepo)
@@ -64,10 +67,36 @@ func main() {
 		log.Fatalf("initialize authorization service: %v", err)
 	}
 
+	roleService, err := service.NewRoleService(roleRepo, permRepo)
+	if err != nil {
+		log.Fatalf("initialize role service: %v", err)
+	}
+
+	tenantService, err := service.NewTenantService(tenantRepo)
+	if err != nil {
+		log.Fatalf("initialize tenant service: %v", err)
+	}
+
+	tenantUserService, err := service.NewTenantUserService(
+		userRepo,
+		tenantRepo,
+		roleRepo,
+		roleAssignRepo,
+		authzRepo,
+		sessionRepo,
+	)
+	if err != nil {
+		log.Fatalf("initialize tenant user service: %v", err)
+	}
+
 	// create handlers
-	userHandler := handler.NewUserHandler(userService, authzService)
 	authHandler := handler.NewAuthHandler(authService)
-	tenantHandler := handler.NewTenantHandler(tenantRepo, authzService)
+	authzHandler := handler.NewAuthorizationHandler(authzService)
+	permHandler := handler.NewPermissionHandler(permRepo, authzService)
+	roleHandler := handler.NewRoleHandler(roleService, authzService, roleAssignRepo)
+	tenantHandler := handler.NewTenantHandler(tenantRepo, authzService, tenantService)
+	tenantUserHandler := handler.NewTenantUserHandler(tenantUserService, authzService)
+	userHandler := handler.NewUserHandler(userService, authzService, tenantUserService)
 
 	// create bearer middleware with default-protected routing and explicit public exemptions
 	bearerMiddleware, err := httpauth.NewBearerMiddleware(
@@ -85,18 +114,49 @@ func main() {
 	// Create router
 	mux := http.NewServeMux()
 
-	// User routes
-	mux.HandleFunc("POST /v1/users", userHandler.CreateUser)
-	mux.HandleFunc("GET /v1/users/{id}", userHandler.GetUser)
-
-	// Tenant routes
-	mux.HandleFunc("GET /v1/tenants/{id}", tenantHandler.GetTenant)
-	mux.HandleFunc("PATCH /v1/tenants/{id}", tenantHandler.UpdateTenant)
-
 	// Auth routes
 	mux.HandleFunc("POST /v1/auth/login", authHandler.Login)
 	mux.HandleFunc("POST /v1/auth/refresh", authHandler.Refresh)
 	mux.HandleFunc("POST /v1/auth/logout", authHandler.Logout)
+
+	// Authorization Check route
+	mux.HandleFunc("POST /v1/authorization/check", authzHandler.Check)
+
+	// Permission Catalog routes
+	mux.HandleFunc("GET /v1/permissions", permHandler.ListPermissions)
+
+	// Platform Role routes
+	mux.HandleFunc("GET /v1/platform-roles", roleHandler.ListPlatformRoles)
+
+	// Tenant Role routes
+	mux.HandleFunc("GET /v1/tenants/{tenantID}/roles", roleHandler.ListTenantRoles)
+	mux.HandleFunc("POST /v1/tenants/{tenantID}/roles", roleHandler.CreateCustomTenantRole)
+	mux.HandleFunc("GET /v1/tenants/{tenantID}/roles/{roleID}", roleHandler.GetTenantRole)
+	mux.HandleFunc("PATCH /v1/tenants/{tenantID}/roles/{roleID}", roleHandler.UpdateCustomTenantRole)
+	mux.HandleFunc("DELETE /v1/tenants/{tenantID}/roles/{roleID}", roleHandler.DeleteCustomTenantRole)
+	mux.HandleFunc("GET /v1/tenants/{tenantID}/roles/{roleID}/users", roleHandler.ListUsersByRole)
+
+	// Tenant Lifecycle routes
+	mux.HandleFunc("POST /v1/tenants", tenantHandler.CreateTenant)
+	mux.HandleFunc("GET /v1/tenants", tenantHandler.ListTenants)
+	mux.HandleFunc("GET /v1/tenants/{id}", tenantHandler.GetTenant)
+	mux.HandleFunc("PATCH /v1/tenants/{id}", tenantHandler.UpdateTenant)
+	mux.HandleFunc("POST /v1/tenants/{id}/deactivate", tenantHandler.DeactivateTenant)
+	mux.HandleFunc("POST /v1/tenants/{id}/reactivate", tenantHandler.ReactivateTenant)
+
+	// Tenant User / Membership routes
+	mux.HandleFunc("POST /v1/tenants/{tenantID}/users", tenantUserHandler.ProvisionUser)
+	mux.HandleFunc("GET /v1/tenants/{tenantID}/users", tenantUserHandler.ListUsers)
+	mux.HandleFunc("GET /v1/tenants/{tenantID}/users/{userID}", tenantUserHandler.GetUser)
+	mux.HandleFunc("POST /v1/tenants/{tenantID}/members", tenantUserHandler.AddMember)
+	mux.HandleFunc("PATCH /v1/tenants/{tenantID}/users/{userID}/role", tenantUserHandler.ChangeRole)
+	mux.HandleFunc("DELETE /v1/tenants/{tenantID}/users/{userID}", tenantUserHandler.RemoveMember)
+
+	// User routes
+	mux.HandleFunc("POST /v1/users", userHandler.CreateUser)
+	mux.HandleFunc("GET /v1/users/{id}", userHandler.GetUser)
+	mux.HandleFunc("POST /v1/users/{id}/deactivate", userHandler.DeactivateUser)
+	mux.HandleFunc("POST /v1/users/{id}/reactivate", userHandler.ReactivateUser)
 
 	server := &http.Server{
 		Addr:         cfg.HTTPAddr,

@@ -263,3 +263,26 @@ func (r *PostgresSessionRepository) IsActive(
 
 	return active, nil
 }
+
+func (r *PostgresSessionRepository) RevokeAllByUserID(
+	ctx context.Context,
+	userID uuid.UUID,
+) error {
+	if userID == uuid.Nil {
+		return fmt.Errorf("user ID is required")
+	}
+
+	const query = `
+		UPDATE sessions
+		SET revoked_at = COALESCE(revoked_at, NOW())
+		WHERE user_id = $1
+		  AND revoked_at IS NULL
+	`
+
+	_, err := r.db.Pool().Exec(ctx, query, userID)
+	if err != nil {
+		return fmt.Errorf("revoke all sessions for user: %w", err)
+	}
+
+	return nil
+}

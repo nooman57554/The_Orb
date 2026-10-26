@@ -94,6 +94,55 @@ func (m *mockUserRepository) Update(ctx context.Context, user *model.User) error
 	return nil
 }
 
+func (m *mockUserRepository) CreateWithTenantRole(ctx context.Context, user *model.User, tenantID, roleID uuid.UUID) error {
+	return m.Create(ctx, user)
+}
+
+func (m *mockUserRepository) GetByIDInTenant(ctx context.Context, userID, tenantID uuid.UUID) (*model.TenantMemberRecord, error) {
+	u, err := m.GetByID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	return &model.TenantMemberRecord{
+		UserID:    u.ID,
+		Email:     u.Email,
+		Status:    u.Status,
+		RoleID:    uuid.New(),
+		RoleName:  "TENANT_USER",
+		RoleScope: model.RoleScopeSystemTenant,
+		JoinedAt:  u.CreatedAt,
+	}, nil
+}
+
+func (m *mockUserRepository) ListByTenant(ctx context.Context, tenantID uuid.UUID, offset, limit int) ([]model.TenantMemberRecord, int, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var records []model.TenantMemberRecord
+	for _, u := range m.usersByID {
+		records = append(records, model.TenantMemberRecord{
+			UserID:    u.ID,
+			Email:     u.Email,
+			Status:    u.Status,
+			RoleID:    uuid.New(),
+			RoleName:  "TENANT_USER",
+			RoleScope: model.RoleScopeSystemTenant,
+			JoinedAt:  u.CreatedAt,
+		})
+	}
+	return records, len(records), nil
+}
+
+func (m *mockUserRepository) SetStatus(ctx context.Context, id uuid.UUID, status string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u, ok := m.usersByID[id]
+	if !ok {
+		return repository.ErrNotFound
+	}
+	u.Status = status
+	return nil
+}
+
 type mockSessionChecker struct {
 	mu             sync.RWMutex
 	activeSessions map[uuid.UUID]bool
@@ -168,6 +217,33 @@ func (m *mockAuthzRepository) HasTenantPermission(ctx context.Context, userID, t
 		return true, nil
 	}
 	return false, nil
+}
+
+func (m *mockAuthzRepository) UserBelongsToTenant(ctx context.Context, userID, tenantID uuid.UUID) (bool, error) {
+	if m.forceError {
+		return false, errors.New("database connection refused: i/o timeout")
+	}
+	if m.tenantPerms[userID] != nil && m.tenantPerms[userID][tenantID] != nil {
+		return true, nil
+	}
+	return false, nil
+}
+
+func (m *mockAuthzRepository) GetTenantRole(ctx context.Context, userID, tenantID uuid.UUID) (*model.Role, error) {
+	if m.forceError {
+		return nil, errors.New("database connection refused: i/o timeout")
+	}
+	return &model.Role{
+		Name:  "TENANT_ADMIN_RW",
+		Scope: model.RoleScopeSystemTenant,
+	}, nil
+}
+
+func (m *mockAuthzRepository) CountActiveTenantAdmins(ctx context.Context, tenantID uuid.UUID) (int, error) {
+	if m.forceError {
+		return 0, errors.New("database connection refused: i/o timeout")
+	}
+	return 1, nil
 }
 
 type handlerFixture struct {

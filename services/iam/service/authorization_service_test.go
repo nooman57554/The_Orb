@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/nooman57554/The_Orb/orb_libs/identity"
+	"github.com/nooman57554/The_Orb/services/iam/model"
 	"github.com/nooman57554/The_Orb/services/iam/service"
 )
 
@@ -58,6 +59,33 @@ func (m *mockAuthorizationRepository) HasTenantPermission(ctx context.Context, u
 		return true, nil
 	}
 	return false, nil
+}
+
+func (m *mockAuthorizationRepository) UserBelongsToTenant(ctx context.Context, userID, tenantID uuid.UUID) (bool, error) {
+	if m.forceError {
+		return false, errors.New("database connection refused: i/o timeout")
+	}
+	if m.tenantPerms[userID] != nil && m.tenantPerms[userID][tenantID] != nil {
+		return true, nil
+	}
+	return false, nil
+}
+
+func (m *mockAuthorizationRepository) GetTenantRole(ctx context.Context, userID, tenantID uuid.UUID) (*model.Role, error) {
+	if m.forceError {
+		return nil, errors.New("database connection refused: i/o timeout")
+	}
+	return &model.Role{
+		Name:  "TENANT_ADMIN_RW",
+		Scope: model.RoleScopeSystemTenant,
+	}, nil
+}
+
+func (m *mockAuthorizationRepository) CountActiveTenantAdmins(ctx context.Context, tenantID uuid.UUID) (int, error) {
+	if m.forceError {
+		return 0, errors.New("database connection refused: i/o timeout")
+	}
+	return 1, nil
 }
 
 func TestNewAuthorizationService_NilRepo(t *testing.T) {

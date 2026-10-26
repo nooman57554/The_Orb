@@ -15,9 +15,44 @@ VALUES
     'Update tenant information'
 ),
 (
+    '01a0f2c7-fc19-7906-b482-79363f85a706',
+    'tenant.create',
+    'Create new tenants'
+),
+(
+    '01a0f2c7-fc19-7907-b482-79363f85a707',
+    'tenant.deactivate',
+    'Deactivate or suspend tenants'
+),
+(
+    '01a0f2c7-fc19-7908-b482-79363f85a708',
+    'tenant.reactivate',
+    'Reactivate tenants'
+),
+(
     '01a0f2c7-fc19-711f-adff-78e9a83a0791',
     'user.read',
     'Read users within a tenant'
+),
+(
+    '01a0f2c7-fc19-7901-b482-79363f85a701',
+    'user.create',
+    'Provision new users'
+),
+(
+    '01a0f2c7-fc19-7902-b482-79363f85a702',
+    'user.update',
+    'Update user profile fields'
+),
+(
+    '01a0f2c7-fc19-7903-b482-79363f85a703',
+    'user.deactivate',
+    'Deactivate or suspend user accounts'
+),
+(
+    '01a0f2c7-fc19-7904-b482-79363f85a704',
+    'user.reactivate',
+    'Reactivate user accounts'
 ),
 (
     '01a0f2c7-fc19-7ea2-a294-1bf965a603f5',
@@ -28,6 +63,46 @@ VALUES
     '01a0f2c7-fc19-7db4-8293-e76cee3eecd3',
     'user.remove',
     'Remove users from a tenant'
+),
+(
+    '01a0f2c7-fc19-7905-b482-79363f85a705',
+    'user.assign_role',
+    'Assign or change a user''s role in a tenant'
+),
+(
+    '01a0f2c7-fc19-7909-b482-79363f85a709',
+    'role.read',
+    'Read roles and their assigned permissions'
+),
+(
+    '01a0f2c7-fc19-7910-b482-79363f85a710',
+    'role.create',
+    'Create custom roles'
+),
+(
+    '01a0f2c7-fc19-7911-b482-79363f85a711',
+    'role.update',
+    'Update roles and their permission assignments'
+),
+(
+    '01a0f2c7-fc19-7912-b482-79363f85a712',
+    'role.delete',
+    'Delete custom roles'
+),
+(
+    '01a0f2c7-fc19-7913-b482-79363f85a713',
+    'role.assign_permissions',
+    'Assign permissions to custom roles'
+),
+(
+    '01a0f2c7-fc19-7914-b482-79363f85a714',
+    'role.assign',
+    'Assign roles to users'
+),
+(
+    '01a0f2c7-fc19-7915-b482-79363f85a715',
+    'permission.read',
+    'Read the permission catalog'
 ),
 (
     '01a0f2c7-fc19-7ad0-91f3-e542afb3927d',

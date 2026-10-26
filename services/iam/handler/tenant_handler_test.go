@@ -72,6 +72,57 @@ func (m *mockTenantRepository) Update(ctx context.Context, tenant *model.Tenant)
 	return nil
 }
 
+func (m *mockTenantRepository) Create(ctx context.Context, tenant *model.Tenant) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if tenant.ID == uuid.Nil {
+		tenant.ID = uuid.New()
+	}
+	now := time.Now()
+	tenant.CreatedAt = now
+	tenant.UpdatedAt = now
+	copy := *tenant
+	m.tenantsByID[tenant.ID] = &copy
+	return nil
+}
+
+func (m *mockTenantRepository) GetBySlug(ctx context.Context, slug string) (*model.Tenant, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, t := range m.tenantsByID {
+		if t.Slug == slug {
+			copy := *t
+			return &copy, nil
+		}
+	}
+	return nil, repository.ErrNotFound
+}
+
+func (m *mockTenantRepository) List(ctx context.Context, offset, limit int) ([]model.Tenant, int, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var tenants []model.Tenant
+	for _, t := range m.tenantsByID {
+		tenants = append(tenants, *t)
+	}
+	return tenants, len(tenants), nil
+}
+
+func (m *mockTenantRepository) SetStatus(ctx context.Context, id uuid.UUID, status string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	t, ok := m.tenantsByID[id]
+	if !ok {
+		return repository.ErrNotFound
+	}
+	t.Status = status
+	return nil
+}
+
 type tenantFixture struct {
 	tenantRepo       *mockTenantRepository
 	authzRepo        *mockAuthzRepository

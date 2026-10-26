@@ -36,8 +36,19 @@ JOIN permissions p
         'tenant.update',
 
         'user.read',
+        'user.create',
+        'user.update',
         'user.invite',
         'user.remove',
+        'user.assign_role',
+
+        'role.read',
+        'role.create',
+        'role.update',
+        'role.delete',
+        'role.assign_permissions',
+        'role.assign',
+        'permission.read',
 
         'agent.read',
         'agent.create',
@@ -72,6 +83,8 @@ JOIN permissions p
     ON p.name IN (
         'tenant.read',
         'user.read',
+        'role.read',
+        'permission.read',
         'agent.read',
         'workflow.read'
     )
