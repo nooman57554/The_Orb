@@ -26,9 +26,6 @@ func (r *PostgresRoleRepository) GetByID(ctx context.Context, id uuid.UUID) (*mo
 	if id == uuid.Nil {
 		return nil, fmt.Errorf("role: %w", ErrNotFound)
 	}
-	if r.db == nil || r.db.Pool() == nil {
-		return nil, fmt.Errorf("database pool not initialized")
-	}
 
 	const query = `
 		SELECT id, name, scope, tenant_id, description, created_at, updated_at
@@ -69,9 +66,6 @@ func (r *PostgresRoleRepository) GetByNameAndScope(
 ) (*model.Role, error) {
 	if name == "" || scope == "" {
 		return nil, fmt.Errorf("role: %w", ErrNotFound)
-	}
-	if r.db == nil || r.db.Pool() == nil {
-		return nil, fmt.Errorf("database pool not initialized")
 	}
 
 	var query string
@@ -126,9 +120,6 @@ func (r *PostgresRoleRepository) ListByTenant(
 	if tenantID == uuid.Nil {
 		return nil, fmt.Errorf("tenant ID is required")
 	}
-	if r.db == nil || r.db.Pool() == nil {
-		return nil, fmt.Errorf("database pool not initialized")
-	}
 
 	const query = `
 		SELECT id, name, scope, tenant_id, description, created_at, updated_at
@@ -165,22 +156,14 @@ func (r *PostgresRoleRepository) ListByTenant(
 		return nil, fmt.Errorf("rows error: %w", err)
 	}
 
-	for i := range roles {
-		perms, err := r.GetRolePermissions(ctx, roles[i].ID)
-		if err != nil {
-			return nil, fmt.Errorf("get role permissions: %w", err)
-		}
-		roles[i].Permissions = perms
+	if err := r.populatePermissionsForRoles(ctx, roles); err != nil {
+		return nil, err
 	}
 
 	return roles, nil
 }
 
 func (r *PostgresRoleRepository) ListPlatform(ctx context.Context) ([]model.Role, error) {
-	if r.db == nil || r.db.Pool() == nil {
-		return nil, fmt.Errorf("database pool not initialized")
-	}
-
 	const query = `
 		SELECT id, name, scope, tenant_id, description, created_at, updated_at
 		FROM roles
@@ -215,15 +198,55 @@ func (r *PostgresRoleRepository) ListPlatform(ctx context.Context) ([]model.Role
 		return nil, fmt.Errorf("rows error: %w", err)
 	}
 
-	for i := range roles {
-		perms, err := r.GetRolePermissions(ctx, roles[i].ID)
-		if err != nil {
-			return nil, fmt.Errorf("get role permissions: %w", err)
-		}
-		roles[i].Permissions = perms
+	if err := r.populatePermissionsForRoles(ctx, roles); err != nil {
+		return nil, err
 	}
 
 	return roles, nil
+}
+
+func (r *PostgresRoleRepository) populatePermissionsForRoles(ctx context.Context, roles []model.Role) error {
+	if len(roles) == 0 {
+		return nil
+	}
+	roleIDs := make([]uuid.UUID, len(roles))
+	roleMap := make(map[uuid.UUID]int, len(roles))
+	for i := range roles {
+		roleIDs[i] = roles[i].ID
+		roleMap[roles[i].ID] = i
+		roles[i].Permissions = make([]model.Permission, 0)
+	}
+
+	const query = `
+		SELECT rp.role_id, p.id, p.name, p.description, p.created_at
+		FROM role_permissions rp
+		JOIN permissions p ON p.id = rp.permission_id
+		WHERE rp.role_id = ANY($1)
+		ORDER BY p.name ASC
+	`
+	rows, err := r.db.Pool().Query(ctx, query, roleIDs)
+	if err != nil {
+		return fmt.Errorf("batch get role permissions: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var roleID uuid.UUID
+		var perm model.Permission
+		if err := rows.Scan(
+			&roleID,
+			&perm.ID,
+			&perm.Name,
+			&perm.Description,
+			&perm.CreatedAt,
+		); err != nil {
+			return fmt.Errorf("scan role permission: %w", err)
+		}
+		if idx, ok := roleMap[roleID]; ok {
+			roles[idx].Permissions = append(roles[idx].Permissions, perm)
+		}
+	}
+	return rows.Err()
 }
 
 func (r *PostgresRoleRepository) CreateCustom(
@@ -420,9 +443,7 @@ func (r *PostgresRoleRepository) DeleteCustom(
 	// Check active assignments
 	const checkAssignQuery = `
 		SELECT EXISTS (
-			SELECT 1 FROM tenant_role_assignments WHERE role_id = $1
-			UNION
-			SELECT 1 FROM platform_role_assignments WHERE role_id = $1
+			SELECT 1 FROM role_assignments WHERE role_id = $1
 		)
 	`
 	var hasAssignments bool
@@ -459,15 +480,10 @@ func (r *PostgresRoleRepository) HasActiveAssignments(
 	if roleID == uuid.Nil {
 		return false, nil
 	}
-	if r.db == nil || r.db.Pool() == nil {
-		return false, fmt.Errorf("database pool not initialized")
-	}
 
 	const query = `
 		SELECT EXISTS (
-			SELECT 1 FROM tenant_role_assignments WHERE role_id = $1
-			UNION
-			SELECT 1 FROM platform_role_assignments WHERE role_id = $1
+			SELECT 1 FROM role_assignments WHERE role_id = $1
 		)
 	`
 	var exists bool
@@ -484,9 +500,6 @@ func (r *PostgresRoleRepository) GetRolePermissions(
 ) ([]model.Permission, error) {
 	if roleID == uuid.Nil {
 		return nil, nil
-	}
-	if r.db == nil || r.db.Pool() == nil {
-		return nil, fmt.Errorf("database pool not initialized")
 	}
 
 	const query = `

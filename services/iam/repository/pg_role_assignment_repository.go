@@ -2,9 +2,11 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/nooman57554/The_Orb/orb_libs/dbconnector"
 	"github.com/nooman57554/The_Orb/services/iam/model"
 )
@@ -26,18 +28,20 @@ func (r *PostgresRoleAssignmentRepository) AssignTenantRole(
 	if userID == uuid.Nil || tenantID == uuid.Nil || roleID == uuid.Nil {
 		return fmt.Errorf("user ID, tenant ID, and role ID are required")
 	}
-	if r.db == nil || r.db.Pool() == nil {
-		return fmt.Errorf("database pool not initialized")
+
+	id, err := uuid.NewV7()
+	if err != nil {
+		return fmt.Errorf("generate assignment id: %w", err)
 	}
 
 	const query = `
-		INSERT INTO tenant_role_assignments (user_id, tenant_id, role_id)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (user_id, tenant_id)
-		DO UPDATE SET role_id = EXCLUDED.role_id
+		INSERT INTO role_assignments (id, user_id, tenant_id, role_id)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (user_id, tenant_id) WHERE tenant_id IS NOT NULL
+		DO UPDATE SET role_id = EXCLUDED.role_id, created_at = NOW()
 	`
 
-	_, err := r.db.Pool().Exec(ctx, query, userID, tenantID, roleID)
+	_, err = r.db.Pool().Exec(ctx, query, id, userID, tenantID, roleID)
 	if err != nil {
 		return fmt.Errorf("assign tenant role: %w", err)
 	}
@@ -52,12 +56,9 @@ func (r *PostgresRoleAssignmentRepository) RemoveTenantRole(
 	if userID == uuid.Nil || tenantID == uuid.Nil {
 		return fmt.Errorf("user ID and tenant ID are required")
 	}
-	if r.db == nil || r.db.Pool() == nil {
-		return fmt.Errorf("database pool not initialized")
-	}
 
 	const query = `
-		DELETE FROM tenant_role_assignments
+		DELETE FROM role_assignments
 		WHERE user_id = $1 AND tenant_id = $2
 	`
 
@@ -80,9 +81,6 @@ func (r *PostgresRoleAssignmentRepository) ListUsersByTenantRole(
 	if tenantID == uuid.Nil || roleID == uuid.Nil {
 		return nil, fmt.Errorf("tenant ID and role ID are required")
 	}
-	if r.db == nil || r.db.Pool() == nil {
-		return nil, fmt.Errorf("database pool not initialized")
-	}
 
 	const query = `
 		SELECT
@@ -92,12 +90,12 @@ func (r *PostgresRoleAssignmentRepository) ListUsersByTenantRole(
 			r.id,
 			r.name,
 			r.scope,
-			tra.created_at
-		FROM tenant_role_assignments tra
-		JOIN users u ON u.id = tra.user_id
-		JOIN roles r ON r.id = tra.role_id
-		WHERE tra.tenant_id = $1 AND tra.role_id = $2
-		ORDER BY tra.created_at DESC
+			ra.created_at
+		FROM role_assignments ra
+		JOIN users u ON u.id = ra.user_id
+		JOIN roles r ON r.id = ra.role_id
+		WHERE ra.tenant_id = $1 AND ra.role_id = $2
+		ORDER BY ra.created_at DESC
 	`
 
 	rows, err := r.db.Pool().Query(ctx, query, tenantID, roleID)
@@ -137,18 +135,20 @@ func (r *PostgresRoleAssignmentRepository) AssignPlatformRole(
 	if userID == uuid.Nil || roleID == uuid.Nil {
 		return fmt.Errorf("user ID and role ID are required")
 	}
-	if r.db == nil || r.db.Pool() == nil {
-		return fmt.Errorf("database pool not initialized")
+
+	id, err := uuid.NewV7()
+	if err != nil {
+		return fmt.Errorf("generate assignment id: %w", err)
 	}
 
 	const query = `
-		INSERT INTO platform_role_assignments (user_id, role_id)
-		VALUES ($1, $2)
-		ON CONFLICT (user_id)
-		DO UPDATE SET role_id = EXCLUDED.role_id
+		INSERT INTO role_assignments (id, user_id, tenant_id, role_id)
+		VALUES ($1, $2, NULL, $3)
+		ON CONFLICT (user_id) WHERE tenant_id IS NULL
+		DO UPDATE SET role_id = EXCLUDED.role_id, created_at = NOW()
 	`
 
-	_, err := r.db.Pool().Exec(ctx, query, userID, roleID)
+	_, err = r.db.Pool().Exec(ctx, query, id, userID, roleID)
 	if err != nil {
 		return fmt.Errorf("assign platform role: %w", err)
 	}
@@ -163,13 +163,10 @@ func (r *PostgresRoleAssignmentRepository) RemovePlatformRole(
 	if userID == uuid.Nil {
 		return fmt.Errorf("user ID is required")
 	}
-	if r.db == nil || r.db.Pool() == nil {
-		return fmt.Errorf("database pool not initialized")
-	}
 
 	const query = `
-		DELETE FROM platform_role_assignments
-		WHERE user_id = $1
+		DELETE FROM role_assignments
+		WHERE user_id = $1 AND tenant_id IS NULL
 	`
 
 	res, err := r.db.Pool().Exec(ctx, query, userID)
@@ -184,19 +181,58 @@ func (r *PostgresRoleAssignmentRepository) RemovePlatformRole(
 	return nil
 }
 
-func (r *PostgresRoleAssignmentRepository) CountPlatformAdmins(
+func (r *PostgresRoleAssignmentRepository) GetPlatformRole(
 	ctx context.Context,
-) (int, error) {
-	if r.db == nil || r.db.Pool() == nil {
-		return 0, fmt.Errorf("database pool not initialized")
+	userID uuid.UUID,
+) (*model.Role, error) {
+	if userID == uuid.Nil {
+		return nil, fmt.Errorf("user ID is required")
 	}
 
 	const query = `
+		SELECT
+			r.id,
+			r.name,
+			r.scope,
+			r.tenant_id,
+			r.description,
+			r.created_at,
+			r.updated_at
+		FROM role_assignments ra
+		JOIN roles r ON r.id = ra.role_id
+		WHERE ra.user_id = $1 AND ra.tenant_id IS NULL
+	`
+
+	var role model.Role
+	err := r.db.Pool().QueryRow(ctx, query, userID).Scan(
+		&role.ID,
+		&role.Name,
+		&role.Scope,
+		&role.TenantID,
+		&role.Description,
+		&role.CreatedAt,
+		&role.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("platform role: %w", ErrNotFound)
+		}
+		return nil, fmt.Errorf("get platform role: %w", err)
+	}
+
+	return &role, nil
+}
+
+func (r *PostgresRoleAssignmentRepository) CountPlatformAdmins(
+	ctx context.Context,
+) (int, error) {
+	const query = `
 		SELECT COUNT(*)
-		FROM platform_role_assignments pra
-		JOIN users u ON u.id = pra.user_id
-		JOIN roles r ON r.id = pra.role_id
-		WHERE u.status = 'active'
+		FROM role_assignments ra
+		JOIN users u ON u.id = ra.user_id
+		JOIN roles r ON r.id = ra.role_id
+		WHERE ra.tenant_id IS NULL
+		  AND u.status = 'active'
 		  AND r.scope = 'platform'
 		  AND r.name = 'PLATFORM_ADMIN'
 	`

@@ -92,12 +92,11 @@ func (h *PermissionHandler) ListPermissions(w http.ResponseWriter, r *http.Reque
 
 	items := make([]permissionItemResponse, len(perms))
 	for i, p := range perms {
-		_, eligible := service.AllowedTenantPermissions[p.Name]
 		items[i] = permissionItemResponse{
 			ID:             p.ID.String(),
 			Name:           p.Name,
 			Description:    p.Description,
-			TenantEligible: eligible,
+			TenantEligible: p.Scope == "tenant",
 			CreatedAt:      p.CreatedAt.Format(time.RFC3339),
 		}
 	}

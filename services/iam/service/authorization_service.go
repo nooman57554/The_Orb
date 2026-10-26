@@ -33,7 +33,71 @@ func NewAuthorizationService(authzRepo repository.AuthorizationRepository) (*Aut
 	return &AuthorizationService{authzRepo: authzRepo}, nil
 }
 
-// Authorize performs a single generic authorization evaluation for the verified principal.
+// AuthorizePlatform evaluates whether the principal holds a platform-scoped permission.
+func (s *AuthorizationService) AuthorizePlatform(
+	ctx context.Context,
+	principal *identity.Principal,
+	permission string,
+) error {
+	if principal == nil || !principal.IsValid() {
+		return ErrUnauthorized
+	}
+	if permission == "" {
+		return ErrForbidden
+	}
+	allowed, err := s.authzRepo.HasPlatformPermission(ctx, principal.UserID, permission)
+	if err != nil {
+		return fmt.Errorf("check platform permission: %w", err)
+	}
+	if !allowed {
+		return ErrForbidden
+	}
+	return nil
+}
+
+// AuthorizeTenant evaluates whether the principal holds a tenant-scoped permission.
+func (s *AuthorizationService) AuthorizeTenant(
+	ctx context.Context,
+	principal *identity.Principal,
+	tenantID uuid.UUID,
+	permission string,
+) error {
+	if principal == nil || !principal.IsValid() {
+		return ErrUnauthorized
+	}
+	if tenantID == uuid.Nil || permission == "" {
+		return ErrForbidden
+	}
+	allowed, err := s.authzRepo.HasTenantPermission(ctx, principal.UserID, tenantID, permission)
+	if err != nil {
+		return fmt.Errorf("check tenant permission: %w", err)
+	}
+	if !allowed {
+		return ErrForbidden
+	}
+	return nil
+}
+
+// AuthorizeUserRead authorizes access to a user profile.
+// A user may always read their own profile. Reading other users requires platform permission "user.read".
+func (s *AuthorizationService) AuthorizeUserRead(
+	ctx context.Context,
+	principal *identity.Principal,
+	targetUserID uuid.UUID,
+) error {
+	if principal == nil || !principal.IsValid() {
+		return ErrUnauthorized
+	}
+	if targetUserID == uuid.Nil {
+		return ErrForbidden
+	}
+	if principal.UserID == targetUserID {
+		return nil
+	}
+	return s.AuthorizePlatform(ctx, principal, "user.read")
+}
+
+// Authorize evaluates a generic authorization request for the caller's verified principal.
 func (s *AuthorizationService) Authorize(
 	ctx context.Context,
 	principal *identity.Principal,
@@ -48,12 +112,8 @@ func (s *AuthorizationService) Authorize(
 
 	// Tenant-scoped authorization
 	if req.TenantID != uuid.Nil {
-		allowed, err := s.authzRepo.HasTenantPermission(ctx, principal.UserID, req.TenantID, req.Action)
-		if err != nil {
-			return fmt.Errorf("check tenant permission: %w", err)
-		}
-		if !allowed {
-			return ErrForbidden
+		if err := s.AuthorizeTenant(ctx, principal, req.TenantID, req.Action); err != nil {
+			return err
 		}
 
 		// If a specific user resource within the tenant is targeted, ensure they belong to this tenant
@@ -73,59 +133,13 @@ func (s *AuthorizationService) Authorize(
 		return nil
 	}
 
-	// Platform-scoped authorization
-	// Special-case: Self-lookup for user profile read
+	// Platform-scoped authorization: self-lookup profile check
 	if req.ResourceType == "user" && req.Action == "user.read" && req.ResourceID != "" {
 		targetUserID, err := uuid.Parse(req.ResourceID)
-		if err == nil && principal.UserID == targetUserID {
-			return nil
+		if err == nil {
+			return s.AuthorizeUserRead(ctx, principal, targetUserID)
 		}
 	}
 
-	allowed, err := s.authzRepo.HasPlatformPermission(ctx, principal.UserID, req.Action)
-	if err != nil {
-		return fmt.Errorf("check platform permission: %w", err)
-	}
-	if !allowed {
-		return ErrForbidden
-	}
-
-	return nil
-}
-
-// AuthorizePlatform evaluates whether the principal holds a platform-scoped permission.
-func (s *AuthorizationService) AuthorizePlatform(
-	ctx context.Context,
-	principal *identity.Principal,
-	permission string,
-) error {
-	return s.Authorize(ctx, principal, AuthorizationRequest{
-		Action: permission,
-	})
-}
-
-// AuthorizeTenant evaluates whether the principal holds a tenant-scoped permission.
-func (s *AuthorizationService) AuthorizeTenant(
-	ctx context.Context,
-	principal *identity.Principal,
-	tenantID uuid.UUID,
-	permission string,
-) error {
-	return s.Authorize(ctx, principal, AuthorizationRequest{
-		Action:   permission,
-		TenantID: tenantID,
-	})
-}
-
-// AuthorizeUserRead authorizes access to a user profile.
-func (s *AuthorizationService) AuthorizeUserRead(
-	ctx context.Context,
-	principal *identity.Principal,
-	targetUserID uuid.UUID,
-) error {
-	return s.Authorize(ctx, principal, AuthorizationRequest{
-		Action:       "user.read",
-		ResourceType: "user",
-		ResourceID:   targetUserID.String(),
-	})
+	return s.AuthorizePlatform(ctx, principal, req.Action)
 }

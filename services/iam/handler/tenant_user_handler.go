@@ -115,7 +115,7 @@ func (h *TenantUserHandler) ProvisionUser(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	member, err := h.tenantUserService.ProvisionTenantUser(r.Context(), tenantID, email, req.Password, roleID)
+	member, err := h.tenantUserService.ProvisionTenantUser(r.Context(), principal, tenantID, email, req.Password, roleID)
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrTenantNotFound):
@@ -128,6 +128,8 @@ func (h *TenantUserHandler) ProvisionUser(w http.ResponseWriter, r *http.Request
 			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "Platform roles cannot be assigned to tenant users.")
 		case errors.Is(err, service.ErrInvalidRoleForTenant):
 			httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Role", "The specified custom role does not belong to this tenant.")
+		case errors.Is(err, service.ErrCannotDelegateRole):
+			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You do not have authority to delegate one or more permissions in this role.")
 		case errors.Is(err, service.ErrUserAlreadyExists):
 			httpx.WriteProblem(w, http.StatusConflict, "User Already Exists", "A user with this email already exists.")
 		default:
@@ -286,7 +288,7 @@ func (h *TenantUserHandler) AddMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	member, err := h.tenantUserService.AddTenantMember(r.Context(), tenantID, userID, roleID)
+	member, err := h.tenantUserService.AddTenantMember(r.Context(), principal, tenantID, userID, roleID)
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrTenantNotFound):
@@ -303,6 +305,8 @@ func (h *TenantUserHandler) AddMember(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "Platform roles cannot be assigned to tenant users.")
 		case errors.Is(err, service.ErrInvalidRoleForTenant):
 			httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Role", "The specified custom role does not belong to this tenant.")
+		case errors.Is(err, service.ErrForbidden):
+			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "Only platform administrators can add existing users directly to a tenant.")
 		default:
 			httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
 		}
@@ -355,7 +359,7 @@ func (h *TenantUserHandler) ChangeRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	member, err := h.tenantUserService.ChangeTenantUserRole(r.Context(), tenantID, userID, roleID)
+	member, err := h.tenantUserService.ChangeTenantUserRole(r.Context(), principal, tenantID, userID, roleID)
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrTenantNotFound):
@@ -370,6 +374,8 @@ func (h *TenantUserHandler) ChangeRole(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "Platform roles cannot be assigned to tenant users.")
 		case errors.Is(err, service.ErrInvalidRoleForTenant):
 			httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Role", "The specified custom role does not belong to this tenant.")
+		case errors.Is(err, service.ErrCannotDelegateRole):
+			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You do not have authority to delegate one or more permissions in this role.")
 		case errors.Is(err, service.ErrCannotRemoveLastAdmin):
 			httpx.WriteProblem(w, http.StatusConflict, "Conflict", "Cannot demote the last active tenant administrator.")
 		default:
@@ -412,7 +418,7 @@ func (h *TenantUserHandler) RemoveMember(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	err = h.tenantUserService.RemoveTenantMember(r.Context(), tenantID, userID)
+	err = h.tenantUserService.RemoveTenantMember(r.Context(), principal, tenantID, userID)
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrMemberNotFound):

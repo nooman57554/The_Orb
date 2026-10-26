@@ -18,6 +18,12 @@ func TestPostgresTenantRepository_InvalidInputs(t *testing.T) {
 		t.Fatal("expected error for nil UUID in GetByID")
 	}
 
+	// GetBySlug with empty slug returns ErrNotFound directly
+	_, err = repo.GetBySlug(context.Background(), "")
+	if err == nil {
+		t.Fatal("expected error for empty slug in GetBySlug")
+	}
+
 	// Update with nil tenant or nil ID returns error directly
 	err = repo.Update(context.Background(), nil)
 	if err == nil {
@@ -29,14 +35,15 @@ func TestPostgresTenantRepository_InvalidInputs(t *testing.T) {
 		t.Fatal("expected error for nil ID in Update")
 	}
 
-	// With valid ID but uninitialized DB connector, must report pool error
-	_, err = repo.GetByID(context.Background(), uuid.New())
+	// SetStatus with nil ID returns error directly
+	err = repo.SetStatus(context.Background(), uuid.Nil, "active")
 	if err == nil {
-		t.Fatal("expected error for uninitialized DB in GetByID")
+		t.Fatal("expected error for nil ID in SetStatus")
 	}
 
-	err = repo.Update(context.Background(), &model.Tenant{ID: uuid.New(), Name: "test"})
+	// Create with nil tenant returns error directly
+	err = repo.Create(context.Background(), nil)
 	if err == nil {
-		t.Fatal("expected error for uninitialized DB in Update")
+		t.Fatal("expected error for nil tenant in Create")
 	}
 }

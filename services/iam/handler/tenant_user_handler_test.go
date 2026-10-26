@@ -92,7 +92,7 @@ func TestTenantUserHandler_ProvisionUser_Success(t *testing.T) {
 	}
 
 	authzService, _ := service.NewAuthorizationService(authzRepo)
-	tenantUserService, _ := service.NewTenantUserService(userRepo, tenantRepo, roleRepo, roleAssignRepo, authzRepo, sessionRepo)
+	tenantUserService, _ := service.NewTenantUserService(userRepo, tenantRepo, roleRepo, roleAssignRepo, authzRepo, sessionRepo, authzService)
 
 	callerID := uuid.New()
 	authzRepo.grantTenant(callerID, tenantID, "user.create")
@@ -150,7 +150,7 @@ func TestTenantUserHandler_DemoteLastAdmin_Conflict(t *testing.T) {
 	userRepo.CreateWithTenantRole(context.Background(), &model.User{ID: adminUserID}, tenantID, adminRoleID)
 
 	authzService, _ := service.NewAuthorizationService(authzRepo)
-	tenantUserService, _ := service.NewTenantUserService(userRepo, tenantRepo, roleRepo, roleAssignRepo, authzRepo, sessionRepo)
+	tenantUserService, _ := service.NewTenantUserService(userRepo, tenantRepo, roleRepo, roleAssignRepo, authzRepo, sessionRepo, authzService)
 
 	authzRepo.grantTenant(adminUserID, tenantID, "user.assign_role")
 

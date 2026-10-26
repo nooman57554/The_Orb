@@ -43,8 +43,8 @@ func TestPermissionHandler_ListPermissions_Success(t *testing.T) {
 
 	permRepo := &mockPermRepoForHandler{
 		perms: []model.Permission{
-			{ID: uuid.New(), Name: "user.read", Description: "Read users"},
-			{ID: uuid.New(), Name: "tenant.create", Description: "Create tenants"},
+			{ID: uuid.New(), Name: "user.read", Scope: "tenant", Description: "Read users"},
+			{ID: uuid.New(), Name: "tenant.create", Scope: "platform", Description: "Create tenants"},
 		},
 	}
 

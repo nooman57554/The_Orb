@@ -93,7 +93,8 @@ func (m *mockRoleRepoForHandler) GetRolePermissions(ctx context.Context, roleID 
 }
 
 type mockRoleAssignRepoForHandler struct {
-	members map[uuid.UUID][]model.TenantMemberRecord
+	members       map[uuid.UUID][]model.TenantMemberRecord
+	platformRoles map[uuid.UUID]*model.Role
 }
 
 func (m *mockRoleAssignRepoForHandler) AssignTenantRole(ctx context.Context, userID, tenantID, roleID uuid.UUID) error {
@@ -106,13 +107,28 @@ func (m *mockRoleAssignRepoForHandler) ListUsersByTenantRole(ctx context.Context
 	return m.members[roleID], nil
 }
 func (m *mockRoleAssignRepoForHandler) AssignPlatformRole(ctx context.Context, userID, roleID uuid.UUID) error {
+	if m.platformRoles == nil {
+		m.platformRoles = make(map[uuid.UUID]*model.Role)
+	}
+	m.platformRoles[userID] = &model.Role{ID: roleID, Scope: model.RoleScopePlatform}
 	return nil
 }
 func (m *mockRoleAssignRepoForHandler) RemovePlatformRole(ctx context.Context, userID uuid.UUID) error {
+	if m.platformRoles != nil {
+		delete(m.platformRoles, userID)
+	}
 	return nil
 }
+func (m *mockRoleAssignRepoForHandler) GetPlatformRole(ctx context.Context, userID uuid.UUID) (*model.Role, error) {
+	if m.platformRoles != nil {
+		if r, ok := m.platformRoles[userID]; ok {
+			return r, nil
+		}
+	}
+	return nil, repository.ErrNotFound
+}
 func (m *mockRoleAssignRepoForHandler) CountPlatformAdmins(ctx context.Context) (int, error) {
-	return 1, nil
+	return 2, nil
 }
 
 func TestRoleHandler_CreateCustomTenantRole(t *testing.T) {
@@ -120,8 +136,9 @@ func TestRoleHandler_CreateCustomTenantRole(t *testing.T) {
 	authzService, _ := service.NewAuthorizationService(authzRepo)
 	roleRepo := &mockRoleRepoForHandler{roles: make(map[uuid.UUID]*model.Role)}
 	permRepo := &mockPermRepoForHandler{}
-	roleService, _ := service.NewRoleService(roleRepo, permRepo)
 	roleAssignRepo := &mockRoleAssignRepoForHandler{members: make(map[uuid.UUID][]model.TenantMemberRecord)}
+	userRepo := newMockUserRepository()
+	roleService, _ := service.NewRoleService(roleRepo, permRepo, roleAssignRepo, authzService, userRepo)
 
 	h := handler.NewRoleHandler(roleService, authzService, roleAssignRepo)
 
@@ -165,8 +182,9 @@ func TestRoleHandler_DeleteCustomTenantRole_ConflictWhenAssigned(t *testing.T) {
 		},
 	}
 	permRepo := &mockPermRepoForHandler{}
-	roleService, _ := service.NewRoleService(roleRepo, permRepo)
 	roleAssignRepo := &mockRoleAssignRepoForHandler{members: make(map[uuid.UUID][]model.TenantMemberRecord)}
+	userRepo := newMockUserRepository()
+	roleService, _ := service.NewRoleService(roleRepo, permRepo, roleAssignRepo, authzService, userRepo)
 
 	h := handler.NewRoleHandler(roleService, authzService, roleAssignRepo)
 
@@ -183,5 +201,48 @@ func TestRoleHandler_DeleteCustomTenantRole_ConflictWhenAssigned(t *testing.T) {
 
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("expected status 409 Conflict, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRoleHandler_PlatformRole_SelfModificationForbidden(t *testing.T) {
+	authzRepo := newMockAuthzRepository()
+	authzService, _ := service.NewAuthorizationService(authzRepo)
+	roleID := uuid.New()
+	roleRepo := &mockRoleRepoForHandler{
+		roles: map[uuid.UUID]*model.Role{
+			roleID: {
+				ID:    roleID,
+				Name:  "PLATFORM_ADMIN",
+				Scope: model.RoleScopePlatform,
+			},
+		},
+	}
+	permRepo := &mockPermRepoForHandler{}
+	roleAssignRepo := &mockRoleAssignRepoForHandler{
+		members:       make(map[uuid.UUID][]model.TenantMemberRecord),
+		platformRoles: make(map[uuid.UUID]*model.Role),
+	}
+	userRepo := newMockUserRepository()
+	roleService, _ := service.NewRoleService(roleRepo, permRepo, roleAssignRepo, authzService, userRepo)
+
+	h := handler.NewRoleHandler(roleService, authzService, roleAssignRepo)
+
+	adminID := uuid.New()
+	userRepo.Create(context.Background(), &model.User{ID: adminID, Status: "active"})
+	authzRepo.grantPlatform(adminID, "role.assign")
+
+	body, _ := json.Marshal(map[string]any{
+		"role_id": roleID.String(),
+	})
+
+	req := httptest.NewRequest(http.MethodPut, "/v1/users/"+adminID.String()+"/platform-role", bytes.NewReader(body))
+	req.SetPathValue("id", adminID.String())
+	req = req.WithContext(identity.WithPrincipal(req.Context(), &identity.Principal{UserID: adminID, SessionID: uuid.New(), TokenID: uuid.New()}))
+	rec := httptest.NewRecorder()
+
+	h.AssignPlatformRole(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected status 403 Forbidden on self-modification, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

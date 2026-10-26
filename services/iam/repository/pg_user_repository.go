@@ -227,11 +227,16 @@ func (r *PostgresUserRepository) CreateWithTenantRole(
 		return fmt.Errorf("create user: %w", err)
 	}
 
+	assignID, err := uuid.NewV7()
+	if err != nil {
+		return fmt.Errorf("generate assignment id: %w", err)
+	}
+
 	const insertAssignmentQuery = `
-		INSERT INTO tenant_role_assignments (user_id, tenant_id, role_id)
-		VALUES ($1, $2, $3)
+		INSERT INTO role_assignments (id, user_id, tenant_id, role_id)
+		VALUES ($1, $2, $3, $4)
 	`
-	_, err = tx.Exec(ctx, insertAssignmentQuery, user.ID, tenantID, roleID)
+	_, err = tx.Exec(ctx, insertAssignmentQuery, assignID, user.ID, tenantID, roleID)
 	if err != nil {
 		return fmt.Errorf("assign tenant role: %w", err)
 	}
@@ -260,7 +265,7 @@ func (r *PostgresUserRepository) GetByIDInTenant(
 			r.name,
 			r.scope,
 			tra.created_at
-		FROM tenant_role_assignments tra
+		FROM role_assignments tra
 		JOIN users u ON u.id = tra.user_id
 		JOIN roles r ON r.id = tra.role_id
 		WHERE tra.user_id = $1
@@ -304,7 +309,7 @@ func (r *PostgresUserRepository) ListByTenant(
 
 	const countQuery = `
 		SELECT COUNT(*)
-		FROM tenant_role_assignments
+		FROM role_assignments
 		WHERE tenant_id = $1
 	`
 	var total int
@@ -321,7 +326,7 @@ func (r *PostgresUserRepository) ListByTenant(
 			r.name,
 			r.scope,
 			tra.created_at
-		FROM tenant_role_assignments tra
+		FROM role_assignments tra
 		JOIN users u ON u.id = tra.user_id
 		JOIN roles r ON r.id = tra.role_id
 		WHERE tra.tenant_id = $1

@@ -29,19 +29,17 @@ func (r *PostgresAuthorizationRepository) HasPlatformPermission(
 	if userID == uuid.Nil || permission == "" {
 		return false, nil
 	}
-	if r.db == nil || r.db.Pool() == nil {
-		return false, fmt.Errorf("database pool not initialized")
-	}
 
 	const query = `
 		SELECT EXISTS (
 			SELECT 1
-			FROM platform_role_assignments pra
-			JOIN roles r ON r.id = pra.role_id AND r.scope = 'platform'
+			FROM role_assignments ra
+			JOIN roles r ON r.id = ra.role_id AND r.scope = 'platform'
 			JOIN role_permissions rp ON rp.role_id = r.id
 			JOIN permissions p ON p.id = rp.permission_id
-			JOIN users u ON u.id = pra.user_id
-			WHERE pra.user_id = $1
+			JOIN users u ON u.id = ra.user_id
+			WHERE ra.user_id = $1
+			  AND ra.tenant_id IS NULL
 			  AND p.name = $2
 			  AND u.status = 'active'
 		)
@@ -65,25 +63,22 @@ func (r *PostgresAuthorizationRepository) HasTenantPermission(
 	if userID == uuid.Nil || tenantID == uuid.Nil || permission == "" {
 		return false, nil
 	}
-	if r.db == nil || r.db.Pool() == nil {
-		return false, fmt.Errorf("database pool not initialized")
-	}
 
 	const query = `
 		SELECT EXISTS (
 			SELECT 1
-			FROM tenant_role_assignments tra
-			JOIN roles r ON r.id = tra.role_id AND r.scope IN ('system_tenant', 'custom_tenant')
+			FROM role_assignments ra
+			JOIN roles r ON r.id = ra.role_id AND r.scope IN ('system_tenant', 'custom_tenant')
 			JOIN role_permissions rp ON rp.role_id = r.id
 			JOIN permissions p ON p.id = rp.permission_id
-			JOIN users u ON u.id = tra.user_id
-			JOIN tenants t ON t.id = tra.tenant_id
-			WHERE tra.user_id = $1
-			  AND tra.tenant_id = $2
+			JOIN users u ON u.id = ra.user_id
+			JOIN tenants t ON t.id = ra.tenant_id
+			WHERE ra.user_id = $1
+			  AND ra.tenant_id = $2
 			  AND p.name = $3
 			  AND u.status = 'active'
 			  AND t.status = 'active'
-			  AND (r.scope != 'custom_tenant' OR r.tenant_id = tra.tenant_id)
+			  AND (r.scope != 'custom_tenant' OR r.tenant_id = ra.tenant_id)
 		)
 	`
 
@@ -104,18 +99,15 @@ func (r *PostgresAuthorizationRepository) UserBelongsToTenant(
 	if userID == uuid.Nil || tenantID == uuid.Nil {
 		return false, nil
 	}
-	if r.db == nil || r.db.Pool() == nil {
-		return false, fmt.Errorf("database pool not initialized")
-	}
 
 	const query = `
 		SELECT EXISTS (
 			SELECT 1
-			FROM tenant_role_assignments tra
-			JOIN users u ON u.id = tra.user_id
-			JOIN tenants t ON t.id = tra.tenant_id
-			WHERE tra.user_id = $1
-			  AND tra.tenant_id = $2
+			FROM role_assignments ra
+			JOIN users u ON u.id = ra.user_id
+			JOIN tenants t ON t.id = ra.tenant_id
+			WHERE ra.user_id = $1
+			  AND ra.tenant_id = $2
 			  AND u.status = 'active'
 			  AND t.status = 'active'
 		)
@@ -138,16 +130,17 @@ func (r *PostgresAuthorizationRepository) GetTenantRole(
 	if userID == uuid.Nil || tenantID == uuid.Nil {
 		return nil, fmt.Errorf("tenant role: %w", ErrNotFound)
 	}
-	if r.db == nil || r.db.Pool() == nil {
-		return nil, fmt.Errorf("database pool not initialized")
-	}
 
 	const query = `
 		SELECT r.id, r.name, r.scope, r.tenant_id, r.description, r.created_at, r.updated_at
-		FROM tenant_role_assignments tra
-		JOIN roles r ON r.id = tra.role_id
-		WHERE tra.user_id = $1
-		  AND tra.tenant_id = $2
+		FROM role_assignments ra
+		JOIN roles r ON r.id = ra.role_id
+		JOIN users u ON u.id = ra.user_id
+		JOIN tenants t ON t.id = ra.tenant_id
+		WHERE ra.user_id = $1
+		  AND ra.tenant_id = $2
+		  AND u.status = 'active'
+		  AND t.status = 'active'
 	`
 
 	var role model.Role
@@ -177,19 +170,16 @@ func (r *PostgresAuthorizationRepository) CountActiveTenantAdmins(
 	if tenantID == uuid.Nil {
 		return 0, nil
 	}
-	if r.db == nil || r.db.Pool() == nil {
-		return 0, fmt.Errorf("database pool not initialized")
-	}
 
 	const query = `
-		SELECT COUNT(DISTINCT tra.user_id)
-		FROM tenant_role_assignments tra
-		JOIN users u ON u.id = tra.user_id
-		JOIN tenants t ON t.id = tra.tenant_id
-		JOIN roles r ON r.id = tra.role_id
+		SELECT COUNT(DISTINCT ra.user_id)
+		FROM role_assignments ra
+		JOIN users u ON u.id = ra.user_id
+		JOIN tenants t ON t.id = ra.tenant_id
+		JOIN roles r ON r.id = ra.role_id
 		JOIN role_permissions rp ON rp.role_id = r.id
 		JOIN permissions p ON p.id = rp.permission_id
-		WHERE tra.tenant_id = $1
+		WHERE ra.tenant_id = $1
 		  AND u.status = 'active'
 		  AND t.status = 'active'
 		  AND p.name IN ('user.assign_role', 'role.assign')

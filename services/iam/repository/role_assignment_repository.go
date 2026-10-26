@@ -14,5 +14,6 @@ type RoleAssignmentRepository interface {
 
 	AssignPlatformRole(ctx context.Context, userID, roleID uuid.UUID) error
 	RemovePlatformRole(ctx context.Context, userID uuid.UUID) error
+	GetPlatformRole(ctx context.Context, userID uuid.UUID) (*model.Role, error)
 	CountPlatformAdmins(ctx context.Context) (int, error)
 }

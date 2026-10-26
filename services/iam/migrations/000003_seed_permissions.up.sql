@@ -1,152 +1,182 @@
 INSERT INTO permissions (
     id,
     name,
+    scope,
     description
 )
 VALUES
 (
     '01a0f2c7-fc19-7839-b482-79363f85a781',
     'tenant.read',
+    'tenant',
     'Read tenant information'
 ),
 (
     '01a0f2c7-fc19-74d3-b5eb-416d05f0b200',
     'tenant.update',
+    'tenant',
     'Update tenant information'
 ),
 (
     '01a0f2c7-fc19-7906-b482-79363f85a706',
     'tenant.create',
+    'platform',
     'Create new tenants'
 ),
 (
     '01a0f2c7-fc19-7907-b482-79363f85a707',
     'tenant.deactivate',
+    'platform',
     'Deactivate or suspend tenants'
 ),
 (
     '01a0f2c7-fc19-7908-b482-79363f85a708',
     'tenant.reactivate',
+    'platform',
     'Reactivate tenants'
 ),
 (
     '01a0f2c7-fc19-711f-adff-78e9a83a0791',
     'user.read',
+    'tenant',
     'Read users within a tenant'
 ),
 (
     '01a0f2c7-fc19-7901-b482-79363f85a701',
     'user.create',
+    'tenant',
     'Provision new users'
 ),
 (
     '01a0f2c7-fc19-7902-b482-79363f85a702',
     'user.update',
+    'tenant',
     'Update user profile fields'
 ),
 (
     '01a0f2c7-fc19-7903-b482-79363f85a703',
     'user.deactivate',
+    'platform',
     'Deactivate or suspend user accounts'
 ),
 (
     '01a0f2c7-fc19-7904-b482-79363f85a704',
     'user.reactivate',
+    'platform',
     'Reactivate user accounts'
 ),
 (
     '01a0f2c7-fc19-7ea2-a294-1bf965a603f5',
     'user.invite',
+    'tenant',
     'Invite users to a tenant'
 ),
 (
     '01a0f2c7-fc19-7db4-8293-e76cee3eecd3',
     'user.remove',
+    'tenant',
     'Remove users from a tenant'
 ),
 (
     '01a0f2c7-fc19-7905-b482-79363f85a705',
     'user.assign_role',
+    'tenant',
     'Assign or change a user''s role in a tenant'
 ),
 (
     '01a0f2c7-fc19-7909-b482-79363f85a709',
     'role.read',
+    'tenant',
     'Read roles and their assigned permissions'
 ),
 (
     '01a0f2c7-fc19-7910-b482-79363f85a710',
     'role.create',
+    'tenant',
     'Create custom roles'
 ),
 (
     '01a0f2c7-fc19-7911-b482-79363f85a711',
     'role.update',
+    'tenant',
     'Update roles and their permission assignments'
 ),
 (
     '01a0f2c7-fc19-7912-b482-79363f85a712',
     'role.delete',
+    'tenant',
     'Delete custom roles'
 ),
 (
     '01a0f2c7-fc19-7913-b482-79363f85a713',
     'role.assign_permissions',
+    'tenant',
     'Assign permissions to custom roles'
 ),
 (
     '01a0f2c7-fc19-7914-b482-79363f85a714',
     'role.assign',
+    'tenant',
     'Assign roles to users'
 ),
 (
     '01a0f2c7-fc19-7915-b482-79363f85a715',
     'permission.read',
+    'tenant',
     'Read the permission catalog'
 ),
 (
     '01a0f2c7-fc19-7ad0-91f3-e542afb3927d',
     'agent.read',
+    'tenant',
     'Read agents'
 ),
 (
     '01a0f2c7-fc19-781d-9a45-5b937eddee42',
     'agent.create',
+    'tenant',
     'Create agents'
 ),
 (
     '01a0f2c7-fc19-7132-a19c-75994c5a87e0',
     'agent.update',
+    'tenant',
     'Update agents'
 ),
 (
     '01a0f2c7-fc19-7ff6-bb5d-00ebccf92453',
     'agent.delete',
+    'tenant',
     'Delete agents'
 ),
 (
     '01a0f2c7-fc19-74eb-b2f3-fcab82f5443d',
     'workflow.read',
+    'tenant',
     'Read workflows'
 ),
 (
     '01a0f2c7-fc19-7f3e-9843-f5f549c5dfbc',
     'workflow.create',
+    'tenant',
     'Create workflows'
 ),
 (
     '01a0f2c7-fc19-7f5c-a944-e39c6c586f38',
     'workflow.update',
+    'tenant',
     'Update workflows'
 ),
 (
     '01a0f2c7-fc19-7706-8b1a-d135e0fdb391',
     'workflow.delete',
+    'tenant',
     'Delete workflows'
 ),
 (
     '01a0f2c7-fc19-7d06-9461-283b635f4cdc',
     'workflow.execute',
+    'tenant',
     'Execute workflows'
 )
 ON CONFLICT (name) DO NOTHING;

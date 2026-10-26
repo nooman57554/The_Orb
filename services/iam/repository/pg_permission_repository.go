@@ -22,12 +22,8 @@ func NewPostgresPermissionRepository(db *dbconnector.DBConnector) *PostgresPermi
 }
 
 func (r *PostgresPermissionRepository) ListAll(ctx context.Context) ([]model.Permission, error) {
-	if r.db == nil || r.db.Pool() == nil {
-		return nil, fmt.Errorf("database pool not initialized")
-	}
-
 	const query = `
-		SELECT id, name, description, created_at
+		SELECT id, name, scope, description, created_at
 		FROM permissions
 		ORDER BY name ASC
 	`
@@ -41,7 +37,7 @@ func (r *PostgresPermissionRepository) ListAll(ctx context.Context) ([]model.Per
 	perms := make([]model.Permission, 0)
 	for rows.Next() {
 		var p model.Permission
-		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Scope, &p.Description, &p.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan permission: %w", err)
 		}
 		perms = append(perms, p)
@@ -61,12 +57,9 @@ func (r *PostgresPermissionRepository) GetByIDs(
 	if len(ids) == 0 {
 		return []model.Permission{}, nil
 	}
-	if r.db == nil || r.db.Pool() == nil {
-		return nil, fmt.Errorf("database pool not initialized")
-	}
 
 	const query = `
-		SELECT id, name, description, created_at
+		SELECT id, name, scope, description, created_at
 		FROM permissions
 		WHERE id = ANY($1)
 		ORDER BY name ASC
@@ -81,7 +74,7 @@ func (r *PostgresPermissionRepository) GetByIDs(
 	perms := make([]model.Permission, 0)
 	for rows.Next() {
 		var p model.Permission
-		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Scope, &p.Description, &p.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan permission: %w", err)
 		}
 		perms = append(perms, p)
@@ -101,18 +94,15 @@ func (r *PostgresPermissionRepository) GetByName(
 	if name == "" {
 		return nil, fmt.Errorf("permission: %w", ErrNotFound)
 	}
-	if r.db == nil || r.db.Pool() == nil {
-		return nil, fmt.Errorf("database pool not initialized")
-	}
 
 	const query = `
-		SELECT id, name, description, created_at
+		SELECT id, name, scope, description, created_at
 		FROM permissions
 		WHERE name = $1
 	`
 
 	var p model.Permission
-	err := r.db.Pool().QueryRow(ctx, query, name).Scan(&p.ID, &p.Name, &p.Description, &p.CreatedAt)
+	err := r.db.Pool().QueryRow(ctx, query, name).Scan(&p.ID, &p.Name, &p.Scope, &p.Description, &p.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("permission: %w", ErrNotFound)

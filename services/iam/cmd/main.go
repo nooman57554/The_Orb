@@ -67,7 +67,13 @@ func main() {
 		log.Fatalf("initialize authorization service: %v", err)
 	}
 
-	roleService, err := service.NewRoleService(roleRepo, permRepo)
+	roleService, err := service.NewRoleService(
+		roleRepo,
+		permRepo,
+		roleAssignRepo,
+		authzService,
+		userRepo,
+	)
 	if err != nil {
 		log.Fatalf("initialize role service: %v", err)
 	}
@@ -84,6 +90,7 @@ func main() {
 		roleAssignRepo,
 		authzRepo,
 		sessionRepo,
+		authzService,
 	)
 	if err != nil {
 		log.Fatalf("initialize tenant user service: %v", err)
@@ -127,6 +134,9 @@ func main() {
 
 	// Platform Role routes
 	mux.HandleFunc("GET /v1/platform-roles", roleHandler.ListPlatformRoles)
+	mux.HandleFunc("PUT /v1/users/{id}/platform-role", roleHandler.AssignPlatformRole)
+	mux.HandleFunc("DELETE /v1/users/{id}/platform-role", roleHandler.RemovePlatformRole)
+	mux.HandleFunc("GET /v1/users/{id}/platform-role", roleHandler.GetPlatformRole)
 
 	// Tenant Role routes
 	mux.HandleFunc("GET /v1/tenants/{tenantID}/roles", roleHandler.ListTenantRoles)

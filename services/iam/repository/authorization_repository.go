@@ -10,11 +10,11 @@ import (
 // AuthorizationRepository defines the interface for database-backed authorization checks.
 type AuthorizationRepository interface {
 	// HasPlatformPermission checks if a user has been granted a specific platform-scoped permission
-	// via platform_role_assignments, verifying that the user status is active.
+	// via role_assignments (tenant_id IS NULL), verifying that the user status is active.
 	HasPlatformPermission(ctx context.Context, userID uuid.UUID, permission string) (bool, error)
 
 	// HasTenantPermission checks if a user has been granted a specific tenant-scoped permission
-	// within a specific tenant via tenant_role_assignments, verifying that both the user and
+	// within a specific tenant via role_assignments, verifying that both the user and
 	// the tenant statuses are active.
 	HasTenantPermission(ctx context.Context, userID uuid.UUID, tenantID uuid.UUID, permission string) (bool, error)
 

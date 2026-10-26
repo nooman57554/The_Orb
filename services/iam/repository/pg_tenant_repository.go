@@ -173,9 +173,6 @@ func (r *PostgresTenantRepository) Update(ctx context.Context, tenant *model.Ten
 	if tenant == nil || tenant.ID == uuid.Nil {
 		return fmt.Errorf("tenant is required")
 	}
-	if r.db == nil || r.db.Pool() == nil {
-		return fmt.Errorf("database pool not initialized")
-	}
 
 	const query = `
 		UPDATE tenants

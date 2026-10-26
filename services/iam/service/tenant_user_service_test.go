@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/nooman57554/The_Orb/orb_libs/identity"
 	"github.com/nooman57554/The_Orb/services/iam/model"
 	"github.com/nooman57554/The_Orb/services/iam/repository"
 	"github.com/nooman57554/The_Orb/services/iam/service"
@@ -79,6 +80,11 @@ func (m *mockUserRepoForUserService) Create(ctx context.Context, user *model.Use
 	return nil
 }
 func (m *mockUserRepoForUserService) CreateWithTenantRole(ctx context.Context, user *model.User, tenantID, roleID uuid.UUID) error {
+	for _, u := range m.users {
+		if u.Email == user.Email {
+			return repository.ErrDuplicateEmail
+		}
+	}
 	if user.ID == uuid.Nil {
 		user.ID = uuid.New()
 	}
@@ -109,7 +115,11 @@ func (m *mockUserRepoForUserService) GetByIDInTenant(ctx context.Context, userID
 	if !ok {
 		return nil, repository.ErrNotFound
 	}
-	roleID, ok := m.members[tenantID][userID]
+	tenantRoles, ok := m.members[tenantID]
+	if !ok {
+		return nil, repository.ErrNotFound
+	}
+	roleID, ok := tenantRoles[userID]
 	if !ok {
 		return nil, repository.ErrNotFound
 	}
@@ -153,12 +163,15 @@ func (m *mockUserRepoForUserService) SetStatus(ctx context.Context, id uuid.UUID
 }
 
 type mockRoleAssignRepo struct {
-	assignments map[uuid.UUID]map[uuid.UUID]uuid.UUID // tenantID -> userID -> roleID
+	userRepo      *mockUserRepoForUserService
+	assignments   map[uuid.UUID]map[uuid.UUID]uuid.UUID // tenantID -> userID -> roleID
+	platformRoles map[uuid.UUID]*model.Role
 }
 
 func newMockRoleAssignRepo() *mockRoleAssignRepo {
 	return &mockRoleAssignRepo{
-		assignments: make(map[uuid.UUID]map[uuid.UUID]uuid.UUID),
+		assignments:   make(map[uuid.UUID]map[uuid.UUID]uuid.UUID),
+		platformRoles: make(map[uuid.UUID]*model.Role),
 	}
 }
 
@@ -167,6 +180,12 @@ func (m *mockRoleAssignRepo) AssignTenantRole(ctx context.Context, userID, tenan
 		m.assignments[tenantID] = make(map[uuid.UUID]uuid.UUID)
 	}
 	m.assignments[tenantID][userID] = roleID
+	if m.userRepo != nil {
+		if m.userRepo.members[tenantID] == nil {
+			m.userRepo.members[tenantID] = make(map[uuid.UUID]uuid.UUID)
+		}
+		m.userRepo.members[tenantID][userID] = roleID
+	}
 	return nil
 }
 func (m *mockRoleAssignRepo) RemoveTenantRole(ctx context.Context, userID, tenantID uuid.UUID) error {
@@ -183,6 +202,13 @@ func (m *mockRoleAssignRepo) AssignPlatformRole(ctx context.Context, userID, rol
 }
 func (m *mockRoleAssignRepo) RemovePlatformRole(ctx context.Context, userID uuid.UUID) error {
 	return nil
+}
+func (m *mockRoleAssignRepo) GetPlatformRole(ctx context.Context, userID uuid.UUID) (*model.Role, error) {
+	r, ok := m.platformRoles[userID]
+	if !ok {
+		return nil, repository.ErrNotFound
+	}
+	return r, nil
 }
 func (m *mockRoleAssignRepo) CountPlatformAdmins(ctx context.Context) (int, error) {
 	return 1, nil
@@ -225,6 +251,7 @@ func TestTenantUserService_LastAdminProtection(t *testing.T) {
 	roleAssignRepo := newMockRoleAssignRepo()
 	authzRepo := newMockAuthorizationRepository()
 	sessionRepo := &mockSessionRepoForUserService{revokedUsers: make(map[uuid.UUID]bool)}
+	authzService, _ := service.NewAuthorizationService(authzRepo)
 
 	tenantID := uuid.New()
 	tenantRepo.tenants[tenantID] = &model.Tenant{ID: tenantID, Status: "active"}
@@ -254,21 +281,207 @@ func TestTenantUserService_LastAdminProtection(t *testing.T) {
 	userRepo.CreateWithTenantRole(context.Background(), userRepo.users[adminUserID], tenantID, adminRoleID)
 	roleAssignRepo.AssignTenantRole(context.Background(), adminUserID, tenantID, adminRoleID)
 
-	svc, err := service.NewTenantUserService(userRepo, tenantRepo, roleRepo, roleAssignRepo, authzRepo, sessionRepo)
+	tokenID := uuid.New()
+	adminPrincipal := &identity.Principal{
+		UserID:    adminUserID,
+		SessionID: uuid.New(),
+		TokenID:   tokenID,
+	}
+
+	authzRepo.setActiveTenantAdmins(tenantID, 1)
+	authzRepo.setTenantRole(adminUserID, tenantID, adminRole)
+	authzRepo.grantTenant(adminUserID, tenantID, "user.assign_role")
+	authzRepo.grantTenant(adminUserID, tenantID, "role.assign")
+	authzRepo.grantTenant(adminUserID, tenantID, "user.remove")
+
+	svc, err := service.NewTenantUserService(userRepo, tenantRepo, roleRepo, roleAssignRepo, authzRepo, sessionRepo, authzService)
 	if err != nil {
 		t.Fatalf("failed to create tenant user service: %v", err)
 	}
 
 	// Attempting to demote the single admin to member role should fail with ErrCannotRemoveLastAdmin
-	_, err = svc.ChangeTenantUserRole(context.Background(), tenantID, adminUserID, memberRoleID)
+	_, err = svc.ChangeTenantUserRole(context.Background(), adminPrincipal, tenantID, adminUserID, memberRoleID)
 	if !errors.Is(err, service.ErrCannotRemoveLastAdmin) {
 		t.Fatalf("expected ErrCannotRemoveLastAdmin on demote, got %v", err)
 	}
 
 	// Attempting to remove the single admin should fail with ErrCannotRemoveLastAdmin
-	err = svc.RemoveTenantMember(context.Background(), tenantID, adminUserID)
+	err = svc.RemoveTenantMember(context.Background(), adminPrincipal, tenantID, adminUserID)
 	if !errors.Is(err, service.ErrCannotRemoveLastAdmin) {
 		t.Fatalf("expected ErrCannotRemoveLastAdmin on remove, got %v", err)
+	}
+}
+
+func TestTenantUserService_Delegation_TenantAdminCannotGrantPermissionsTheyLack(t *testing.T) {
+	userRepo := newMockUserRepoForUserService()
+	tenantRepo := newMockTenantRepoForUserService()
+	roleRepo := newMockRoleRepository()
+	roleAssignRepo := newMockRoleAssignRepo()
+	authzRepo := newMockAuthorizationRepository()
+	sessionRepo := &mockSessionRepoForUserService{revokedUsers: make(map[uuid.UUID]bool)}
+	authzService, _ := service.NewAuthorizationService(authzRepo)
+
+	tenantID := uuid.New()
+	tenantRepo.tenants[tenantID] = &model.Tenant{ID: tenantID, Status: "active"}
+
+	// Actor only has user.read and user.create
+	actorRoleID := uuid.New()
+	actorRole := &model.Role{
+		ID:       actorRoleID,
+		Name:     "LIMITED_ADMIN",
+		Scope:    model.RoleScopeCustomTenant,
+		TenantID: &tenantID,
+		Permissions: []model.Permission{
+			{Name: "user.read"},
+			{Name: "user.create"},
+			{Name: "user.assign_role"},
+		},
+	}
+	roleRepo.roles[actorRoleID] = actorRole
+
+	// Target role has workflow.execute, which actor lacks
+	targetRoleID := uuid.New()
+	targetRole := &model.Role{
+		ID:       targetRoleID,
+		Name:     "WORKFLOW_MASTER",
+		Scope:    model.RoleScopeCustomTenant,
+		TenantID: &tenantID,
+		Permissions: []model.Permission{
+			{Name: "user.read"},
+			{Name: "workflow.execute"},
+		},
+	}
+	roleRepo.roles[targetRoleID] = targetRole
+
+	actorID := uuid.New()
+	tokenID := uuid.New()
+	actorPrincipal := &identity.Principal{
+		UserID:    actorID,
+		SessionID: uuid.New(),
+		TokenID:   tokenID,
+	}
+
+	authzRepo.setTenantRole(actorID, tenantID, actorRole)
+	authzRepo.grantTenant(actorID, tenantID, "user.assign_role")
+
+	svc, err := service.NewTenantUserService(userRepo, tenantRepo, roleRepo, roleAssignRepo, authzRepo, sessionRepo, authzService)
+	if err != nil {
+		t.Fatalf("failed to create tenant user service: %v", err)
+	}
+
+	// Provisioning with a role containing permissions actor lacks must fail with ErrCannotDelegateRole
+	_, err = svc.ProvisionTenantUser(context.Background(), actorPrincipal, tenantID, "newuser@example.com", "Password123!", targetRoleID)
+	if !errors.Is(err, service.ErrCannotDelegateRole) {
+		t.Fatalf("expected ErrCannotDelegateRole, got %v", err)
+	}
+}
+
+func TestTenantUserService_AddTenantMember_PlatformAdminAllowed_TenantAdminForbidden(t *testing.T) {
+	userRepo := newMockUserRepoForUserService()
+	tenantRepo := newMockTenantRepoForUserService()
+	roleRepo := newMockRoleRepository()
+	roleAssignRepo := newMockRoleAssignRepo()
+	roleAssignRepo.userRepo = userRepo
+	authzRepo := newMockAuthorizationRepository()
+	sessionRepo := &mockSessionRepoForUserService{revokedUsers: make(map[uuid.UUID]bool)}
+	authzService, _ := service.NewAuthorizationService(authzRepo)
+
+	tenantID := uuid.New()
+	tenantRepo.tenants[tenantID] = &model.Tenant{ID: tenantID, Status: "active"}
+
+	targetUserID := uuid.New()
+	userRepo.users[targetUserID] = &model.User{ID: targetUserID, Email: "existing@example.com", Status: "active"}
+
+	roleID := uuid.New()
+	roleRepo.roles[roleID] = &model.Role{
+		ID:    roleID,
+		Name:  "TENANT_USER",
+		Scope: model.RoleScopeSystemTenant,
+	}
+
+	// 1. Tenant Admin attempting to directly add existing global user must be forbidden
+	tenantAdminID := uuid.New()
+	token1 := uuid.New()
+	tenantAdminPrincipal := &identity.Principal{
+		UserID:    tenantAdminID,
+		SessionID: uuid.New(),
+		TokenID:   token1,
+	}
+	// Tenant admin does NOT have platform role.assign
+
+	svc, err := service.NewTenantUserService(userRepo, tenantRepo, roleRepo, roleAssignRepo, authzRepo, sessionRepo, authzService)
+	if err != nil {
+		t.Fatalf("failed to create tenant user service: %v", err)
+	}
+
+	_, err = svc.AddTenantMember(context.Background(), tenantAdminPrincipal, tenantID, targetUserID, roleID)
+	if !errors.Is(err, service.ErrForbidden) {
+		t.Fatalf("expected ErrForbidden for tenant admin adding existing global user, got %v", err)
+	}
+
+	// 2. Platform Admin with platform role.assign is permitted
+	platformAdminID := uuid.New()
+	token2 := uuid.New()
+	platformAdminPrincipal := &identity.Principal{
+		UserID:    platformAdminID,
+		SessionID: uuid.New(),
+		TokenID:   token2,
+	}
+	authzRepo.grantPlatform(platformAdminID, "role.assign")
+
+	member, err := svc.AddTenantMember(context.Background(), platformAdminPrincipal, tenantID, targetUserID, roleID)
+	if err != nil {
+		t.Fatalf("unexpected error for platform admin adding member: %v", err)
+	}
+	if member.UserID != targetUserID {
+		t.Fatalf("expected member user ID %s, got %s", targetUserID, member.UserID)
+	}
+}
+
+func TestTenantUserService_ProvisionTenantUser_DuplicateEmailConflict(t *testing.T) {
+	userRepo := newMockUserRepoForUserService()
+	tenantRepo := newMockTenantRepoForUserService()
+	roleRepo := newMockRoleRepository()
+	roleAssignRepo := newMockRoleAssignRepo()
+	authzRepo := newMockAuthorizationRepository()
+	sessionRepo := &mockSessionRepoForUserService{revokedUsers: make(map[uuid.UUID]bool)}
+	authzService, _ := service.NewAuthorizationService(authzRepo)
+
+	tenantID := uuid.New()
+	tenantRepo.tenants[tenantID] = &model.Tenant{ID: tenantID, Status: "active"}
+
+	roleID := uuid.New()
+	roleRepo.roles[roleID] = &model.Role{
+		ID:    roleID,
+		Name:  "TENANT_USER",
+		Scope: model.RoleScopeSystemTenant,
+	}
+
+	// Pre-existing user with same email
+	existingID := uuid.New()
+	userRepo.users[existingID] = &model.User{
+		ID:     existingID,
+		Email:  "duplicate@example.com",
+		Status: "active",
+	}
+
+	adminID := uuid.New()
+	tokenID := uuid.New()
+	adminPrincipal := &identity.Principal{
+		UserID:    adminID,
+		SessionID: uuid.New(),
+		TokenID:   tokenID,
+	}
+	authzRepo.grantPlatform(adminID, "role.assign")
+
+	svc, err := service.NewTenantUserService(userRepo, tenantRepo, roleRepo, roleAssignRepo, authzRepo, sessionRepo, authzService)
+	if err != nil {
+		t.Fatalf("failed to create tenant user service: %v", err)
+	}
+
+	_, err = svc.ProvisionTenantUser(context.Background(), adminPrincipal, tenantID, "duplicate@example.com", "Password123!", roleID)
+	if !errors.Is(err, service.ErrUserAlreadyExists) {
+		t.Fatalf("expected ErrUserAlreadyExists on duplicate email, got %v", err)
 	}
 }
 
@@ -279,11 +492,12 @@ func TestTenantUserService_DeactivateUser_RevokesSessions(t *testing.T) {
 	roleAssignRepo := newMockRoleAssignRepo()
 	authzRepo := newMockAuthorizationRepository()
 	sessionRepo := &mockSessionRepoForUserService{revokedUsers: make(map[uuid.UUID]bool)}
+	authzService, _ := service.NewAuthorizationService(authzRepo)
 
 	targetUserID := uuid.New()
 	userRepo.users[targetUserID] = &model.User{ID: targetUserID, Status: "active"}
 
-	svc, err := service.NewTenantUserService(userRepo, tenantRepo, roleRepo, roleAssignRepo, authzRepo, sessionRepo)
+	svc, err := service.NewTenantUserService(userRepo, tenantRepo, roleRepo, roleAssignRepo, authzRepo, sessionRepo, authzService)
 	if err != nil {
 		t.Fatalf("failed to create tenant user service: %v", err)
 	}

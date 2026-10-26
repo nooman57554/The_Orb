@@ -53,14 +53,26 @@ func TestPostgresAuthorizationRepository_InvalidInputs(t *testing.T) {
 		t.Error("expected false for empty permission")
 	}
 
-	// When valid inputs are provided with nil DB connector, it must report pool error
-	_, err = repo.HasPlatformPermission(context.Background(), uuid.New(), "user.read")
-	if err == nil {
-		t.Error("expected error for uninitialized DB in HasPlatformPermission")
+	// UserBelongsToTenant with nil inputs must return false, nil without accessing db
+	allowed, err = repo.UserBelongsToTenant(context.Background(), uuid.Nil, uuid.New())
+	if err != nil || allowed {
+		t.Error("expected false, nil for nil user ID in UserBelongsToTenant")
 	}
 
-	_, err = repo.HasTenantPermission(context.Background(), uuid.New(), uuid.New(), "tenant.read")
+	allowed, err = repo.UserBelongsToTenant(context.Background(), uuid.New(), uuid.Nil)
+	if err != nil || allowed {
+		t.Error("expected false, nil for nil tenant ID in UserBelongsToTenant")
+	}
+
+	// GetTenantRole with nil inputs must return error without accessing db
+	_, err = repo.GetTenantRole(context.Background(), uuid.Nil, uuid.New())
 	if err == nil {
-		t.Error("expected error for uninitialized DB in HasTenantPermission")
+		t.Error("expected error for nil user ID in GetTenantRole")
+	}
+
+	// CountActiveTenantAdmins with nil tenant returns 0, nil without accessing db
+	count, err := repo.CountActiveTenantAdmins(context.Background(), uuid.Nil)
+	if err != nil || count != 0 {
+		t.Error("expected 0, nil for nil tenant ID in CountActiveTenantAdmins")
 	}
 }

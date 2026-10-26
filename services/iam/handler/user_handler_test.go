@@ -172,6 +172,8 @@ func (m *mockSessionChecker) IsActive(ctx context.Context, sessionID uuid.UUID) 
 type mockAuthzRepository struct {
 	platformPerms map[uuid.UUID]map[string]bool
 	tenantPerms   map[uuid.UUID]map[uuid.UUID]map[string]bool
+	tenantRoles   map[uuid.UUID]map[uuid.UUID]*model.Role
+	activeAdmins  map[uuid.UUID]int
 	forceError    bool
 }
 
@@ -179,6 +181,8 @@ func newMockAuthzRepository() *mockAuthzRepository {
 	return &mockAuthzRepository{
 		platformPerms: make(map[uuid.UUID]map[string]bool),
 		tenantPerms:   make(map[uuid.UUID]map[uuid.UUID]map[string]bool),
+		tenantRoles:   make(map[uuid.UUID]map[uuid.UUID]*model.Role),
+		activeAdmins:  make(map[uuid.UUID]int),
 	}
 }
 
@@ -233,6 +237,9 @@ func (m *mockAuthzRepository) GetTenantRole(ctx context.Context, userID, tenantI
 	if m.forceError {
 		return nil, errors.New("database connection refused: i/o timeout")
 	}
+	if m.tenantRoles != nil && m.tenantRoles[userID] != nil && m.tenantRoles[userID][tenantID] != nil {
+		return m.tenantRoles[userID][tenantID], nil
+	}
 	return &model.Role{
 		Name:  "TENANT_ADMIN_RW",
 		Scope: model.RoleScopeSystemTenant,
@@ -242,6 +249,11 @@ func (m *mockAuthzRepository) GetTenantRole(ctx context.Context, userID, tenantI
 func (m *mockAuthzRepository) CountActiveTenantAdmins(ctx context.Context, tenantID uuid.UUID) (int, error) {
 	if m.forceError {
 		return 0, errors.New("database connection refused: i/o timeout")
+	}
+	if m.activeAdmins != nil {
+		if count, ok := m.activeAdmins[tenantID]; ok {
+			return count, nil
+		}
 	}
 	return 1, nil
 }

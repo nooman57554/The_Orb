@@ -460,3 +460,130 @@ func (h *RoleHandler) ListUsersByRole(w http.ResponseWriter, r *http.Request) {
 		Users []tenantMemberResponse `json:"users"`
 	}{Users: items})
 }
+
+type assignPlatformRoleRequest struct {
+	RoleID string `json:"role_id"`
+}
+
+func (h *RoleHandler) AssignPlatformRole(w http.ResponseWriter, r *http.Request) {
+	principal, ok := identity.PrincipalFromContext(r.Context())
+	if !ok {
+		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
+		return
+	}
+
+	targetUserID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "User ID must be a valid UUID.")
+		return
+	}
+
+	var req assignPlatformRoleRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "Request body must contain valid JSON.")
+		return
+	}
+
+	roleID, err := uuid.Parse(strings.TrimSpace(req.RoleID))
+	if err != nil {
+		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "role_id must be a valid UUID.")
+		return
+	}
+
+	err = h.roleService.AssignPlatformRole(r.Context(), principal, targetUserID, roleID)
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrUnauthorized):
+			httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
+		case errors.Is(err, service.ErrForbidden):
+			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You are not authorized to assign platform roles.")
+		case errors.Is(err, service.ErrCannotModifyOwnPlatformRole):
+			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "Platform administrators cannot modify their own platform role.")
+		case errors.Is(err, repository.ErrNotFound), errors.Is(err, service.ErrRoleNotFound):
+			httpx.WriteProblem(w, http.StatusNotFound, "Not Found", "The requested user or role was not found.")
+		case errors.Is(err, service.ErrCannotRemoveLastPlatformAdmin):
+			httpx.WriteProblem(w, http.StatusConflict, "Conflict", "Cannot remove or demote the last active platform administrator.")
+		case errors.Is(err, service.ErrInvalidPlatformRole):
+			httpx.WriteProblem(w, http.StatusBadRequest, "Bad Request", "The specified role is not a platform role.")
+		default:
+			httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
+		}
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func (h *RoleHandler) RemovePlatformRole(w http.ResponseWriter, r *http.Request) {
+	principal, ok := identity.PrincipalFromContext(r.Context())
+	if !ok {
+		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
+		return
+	}
+
+	targetUserID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "User ID must be a valid UUID.")
+		return
+	}
+
+	err = h.roleService.RemovePlatformRole(r.Context(), principal, targetUserID)
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrUnauthorized):
+			httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
+		case errors.Is(err, service.ErrForbidden):
+			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You are not authorized to remove platform roles.")
+		case errors.Is(err, service.ErrCannotModifyOwnPlatformRole):
+			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "Platform administrators cannot remove their own platform role.")
+		case errors.Is(err, repository.ErrNotFound):
+			httpx.WriteProblem(w, http.StatusNotFound, "Not Found", "No platform role assignment found for this user.")
+		case errors.Is(err, service.ErrCannotRemoveLastPlatformAdmin):
+			httpx.WriteProblem(w, http.StatusConflict, "Conflict", "Cannot remove or demote the last active platform administrator.")
+		default:
+			httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
+		}
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *RoleHandler) GetPlatformRole(w http.ResponseWriter, r *http.Request) {
+	principal, ok := identity.PrincipalFromContext(r.Context())
+	if !ok {
+		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
+		return
+	}
+
+	targetUserID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "User ID must be a valid UUID.")
+		return
+	}
+
+	if err := h.authzService.AuthorizePlatform(r.Context(), principal, "role.read"); err != nil {
+		if errors.Is(err, service.ErrUnauthorized) {
+			httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
+			return
+		}
+		if errors.Is(err, service.ErrForbidden) {
+			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You are not authorized to view platform roles.")
+			return
+		}
+		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
+		return
+	}
+
+	role, err := h.roleService.GetPlatformRole(r.Context(), targetUserID)
+	if err != nil {
+		if errors.Is(err, service.ErrRoleNotFound) {
+			httpx.WriteProblem(w, http.StatusNotFound, "Role Not Found", "The user does not have a platform role.")
+			return
+		}
+		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, formatRole(role))
+}

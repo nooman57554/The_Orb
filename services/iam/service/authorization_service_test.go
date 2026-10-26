@@ -14,6 +14,8 @@ import (
 type mockAuthorizationRepository struct {
 	platformPerms map[uuid.UUID]map[string]bool
 	tenantPerms   map[uuid.UUID]map[uuid.UUID]map[string]bool
+	tenantRoles   map[uuid.UUID]map[uuid.UUID]*model.Role
+	activeAdmins  map[uuid.UUID]int
 	forceError    bool
 }
 
@@ -21,6 +23,8 @@ func newMockAuthorizationRepository() *mockAuthorizationRepository {
 	return &mockAuthorizationRepository{
 		platformPerms: make(map[uuid.UUID]map[string]bool),
 		tenantPerms:   make(map[uuid.UUID]map[uuid.UUID]map[string]bool),
+		tenantRoles:   make(map[uuid.UUID]map[uuid.UUID]*model.Role),
+		activeAdmins:  make(map[uuid.UUID]int),
 	}
 }
 
@@ -39,6 +43,17 @@ func (m *mockAuthorizationRepository) grantTenant(userID, tenantID uuid.UUID, pe
 		m.tenantPerms[userID][tenantID] = make(map[string]bool)
 	}
 	m.tenantPerms[userID][tenantID][permission] = true
+}
+
+func (m *mockAuthorizationRepository) setTenantRole(userID, tenantID uuid.UUID, role *model.Role) {
+	if m.tenantRoles[userID] == nil {
+		m.tenantRoles[userID] = make(map[uuid.UUID]*model.Role)
+	}
+	m.tenantRoles[userID][tenantID] = role
+}
+
+func (m *mockAuthorizationRepository) setActiveTenantAdmins(tenantID uuid.UUID, count int) {
+	m.activeAdmins[tenantID] = count
 }
 
 func (m *mockAuthorizationRepository) HasPlatformPermission(ctx context.Context, userID uuid.UUID, permission string) (bool, error) {
@@ -75,6 +90,9 @@ func (m *mockAuthorizationRepository) GetTenantRole(ctx context.Context, userID,
 	if m.forceError {
 		return nil, errors.New("database connection refused: i/o timeout")
 	}
+	if m.tenantRoles != nil && m.tenantRoles[userID] != nil && m.tenantRoles[userID][tenantID] != nil {
+		return m.tenantRoles[userID][tenantID], nil
+	}
 	return &model.Role{
 		Name:  "TENANT_ADMIN_RW",
 		Scope: model.RoleScopeSystemTenant,
@@ -84,6 +102,11 @@ func (m *mockAuthorizationRepository) GetTenantRole(ctx context.Context, userID,
 func (m *mockAuthorizationRepository) CountActiveTenantAdmins(ctx context.Context, tenantID uuid.UUID) (int, error) {
 	if m.forceError {
 		return 0, errors.New("database connection refused: i/o timeout")
+	}
+	if m.activeAdmins != nil {
+		if count, ok := m.activeAdmins[tenantID]; ok {
+			return count, nil
+		}
 	}
 	return 1, nil
 }
