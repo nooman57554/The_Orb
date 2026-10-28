@@ -7,21 +7,29 @@ import (
 
 	"github.com/nooman57554/The_Orb/orb_libs/httpx"
 	"github.com/nooman57554/The_Orb/orb_libs/identity"
+	"github.com/nooman57554/The_Orb/services/iam/model"
 	"github.com/nooman57554/The_Orb/services/iam/repository"
 	"github.com/nooman57554/The_Orb/services/iam/service"
 )
 
 type PermissionHandler struct {
 	permRepo     repository.PermissionRepository
+	roleService  *service.RoleService
 	authzService *service.AuthorizationService
 }
 
 func NewPermissionHandler(
 	permRepo repository.PermissionRepository,
 	authzService *service.AuthorizationService,
+	roleService ...*service.RoleService,
 ) *PermissionHandler {
+	var rs *service.RoleService
+	if len(roleService) > 0 {
+		rs = roleService[0]
+	}
 	return &PermissionHandler{
 		permRepo:     permRepo,
+		roleService:  rs,
 		authzService: authzService,
 	}
 }
@@ -79,7 +87,12 @@ func (h *PermissionHandler) ListPermissions(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	perms, err := h.permRepo.ListAll(r.Context())
+	var perms []model.Permission
+	if h.roleService != nil {
+		perms, err = h.roleService.ListPermissions(r.Context())
+	} else if h.permRepo != nil {
+		perms, err = h.permRepo.ListAll(r.Context())
+	}
 	if err != nil {
 		httpx.WriteProblem(
 			w,

@@ -258,6 +258,13 @@ func (m *mockAuthzRepository) CountActiveTenantAdmins(ctx context.Context, tenan
 	return 1, nil
 }
 
+func (m *mockAuthzRepository) IsUserActive(ctx context.Context, userID uuid.UUID) (bool, error) {
+	if m.forceError {
+		return false, errors.New("database connection refused: i/o timeout")
+	}
+	return true, nil
+}
+
 type handlerFixture struct {
 	userRepo         *mockUserRepository
 	authzRepo        *mockAuthzRepository

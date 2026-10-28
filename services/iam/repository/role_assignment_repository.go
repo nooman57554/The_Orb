@@ -2,9 +2,15 @@ package repository
 
 import (
 	"context"
+	"errors"
 
 	"github.com/google/uuid"
 	"github.com/nooman57554/The_Orb/services/iam/model"
+)
+
+var (
+	ErrLastPlatformAdmin = errors.New("cannot remove or demote the last active platform administrator")
+	ErrLastTenantAdmin   = errors.New("cannot remove or demote the last active tenant administrator")
 )
 
 type RoleAssignmentRepository interface {

@@ -79,7 +79,7 @@ func (s *AuthorizationService) AuthorizeTenant(
 }
 
 // AuthorizeUserRead authorizes access to a user profile.
-// A user may always read their own profile. Reading other users requires platform permission "user.read".
+// A user may always read their own profile if their status is active. Reading other users requires platform permission "user.read".
 func (s *AuthorizationService) AuthorizeUserRead(
 	ctx context.Context,
 	principal *identity.Principal,
@@ -92,6 +92,13 @@ func (s *AuthorizationService) AuthorizeUserRead(
 		return ErrForbidden
 	}
 	if principal.UserID == targetUserID {
+		active, err := s.authzRepo.IsUserActive(ctx, principal.UserID)
+		if err != nil {
+			return fmt.Errorf("check user active: %w", err)
+		}
+		if !active {
+			return ErrForbidden
+		}
 		return nil
 	}
 	return s.AuthorizePlatform(ctx, principal, "user.read")

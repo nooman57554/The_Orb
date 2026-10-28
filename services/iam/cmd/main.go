@@ -13,6 +13,7 @@ import (
 	"github.com/nooman57554/The_Orb/services/iam/config"
 	"github.com/nooman57554/The_Orb/services/iam/handler"
 	"github.com/nooman57554/The_Orb/services/iam/keyloader"
+	"github.com/nooman57554/The_Orb/services/iam/middleware"
 	"github.com/nooman57554/The_Orb/services/iam/repository"
 	"github.com/nooman57554/The_Orb/services/iam/service"
 )
@@ -96,11 +97,16 @@ func main() {
 		log.Fatalf("initialize tenant user service: %v", err)
 	}
 
+	authorizer, err := middleware.NewAuthorizer(authzService)
+	if err != nil {
+		log.Fatalf("initialize authorizer middleware: %v", err)
+	}
+
 	// create handlers
 	authHandler := handler.NewAuthHandler(authService)
 	authzHandler := handler.NewAuthorizationHandler(authzService)
-	permHandler := handler.NewPermissionHandler(permRepo, authzService)
-	roleHandler := handler.NewRoleHandler(roleService, authzService, roleAssignRepo)
+	permHandler := handler.NewPermissionHandler(nil, authzService, roleService)
+	roleHandler := handler.NewRoleHandler(roleService, authzService)
 	tenantHandler := handler.NewTenantHandler(tenantRepo, authzService, tenantService)
 	tenantUserHandler := handler.NewTenantUserHandler(tenantUserService, authzService)
 	userHandler := handler.NewUserHandler(userService, authzService, tenantUserService)
@@ -133,40 +139,40 @@ func main() {
 	mux.HandleFunc("GET /v1/permissions", permHandler.ListPermissions)
 
 	// Platform Role routes
-	mux.HandleFunc("GET /v1/platform-roles", roleHandler.ListPlatformRoles)
-	mux.HandleFunc("PUT /v1/users/{id}/platform-role", roleHandler.AssignPlatformRole)
-	mux.HandleFunc("DELETE /v1/users/{id}/platform-role", roleHandler.RemovePlatformRole)
-	mux.HandleFunc("GET /v1/users/{id}/platform-role", roleHandler.GetPlatformRole)
+	mux.HandleFunc("GET /v1/platform-roles", authorizer.RequirePlatform("role.read", roleHandler.ListPlatformRoles))
+	mux.HandleFunc("PUT /v1/users/{id}/platform-role", authorizer.RequirePlatform("role.assign", roleHandler.AssignPlatformRole))
+	mux.HandleFunc("DELETE /v1/users/{id}/platform-role", authorizer.RequirePlatform("role.assign", roleHandler.RemovePlatformRole))
+	mux.HandleFunc("GET /v1/users/{id}/platform-role", authorizer.RequirePlatform("role.read", roleHandler.GetPlatformRole))
 
 	// Tenant Role routes
-	mux.HandleFunc("GET /v1/tenants/{tenantID}/roles", roleHandler.ListTenantRoles)
-	mux.HandleFunc("POST /v1/tenants/{tenantID}/roles", roleHandler.CreateCustomTenantRole)
-	mux.HandleFunc("GET /v1/tenants/{tenantID}/roles/{roleID}", roleHandler.GetTenantRole)
-	mux.HandleFunc("PATCH /v1/tenants/{tenantID}/roles/{roleID}", roleHandler.UpdateCustomTenantRole)
-	mux.HandleFunc("DELETE /v1/tenants/{tenantID}/roles/{roleID}", roleHandler.DeleteCustomTenantRole)
-	mux.HandleFunc("GET /v1/tenants/{tenantID}/roles/{roleID}/users", roleHandler.ListUsersByRole)
+	mux.HandleFunc("GET /v1/tenants/{tenantID}/roles", authorizer.RequireTenant("tenantID", "role.read", roleHandler.ListTenantRoles))
+	mux.HandleFunc("POST /v1/tenants/{tenantID}/roles", authorizer.RequireTenant("tenantID", "role.create", roleHandler.CreateCustomTenantRole))
+	mux.HandleFunc("GET /v1/tenants/{tenantID}/roles/{roleID}", authorizer.RequireTenant("tenantID", "role.read", roleHandler.GetTenantRole))
+	mux.HandleFunc("PATCH /v1/tenants/{tenantID}/roles/{roleID}", authorizer.RequireTenant("tenantID", "role.update", roleHandler.UpdateCustomTenantRole))
+	mux.HandleFunc("DELETE /v1/tenants/{tenantID}/roles/{roleID}", authorizer.RequireTenant("tenantID", "role.delete", roleHandler.DeleteCustomTenantRole))
+	mux.HandleFunc("GET /v1/tenants/{tenantID}/roles/{roleID}/users", authorizer.RequireTenant("tenantID", "role.read", roleHandler.ListUsersByRole))
 
 	// Tenant Lifecycle routes
-	mux.HandleFunc("POST /v1/tenants", tenantHandler.CreateTenant)
-	mux.HandleFunc("GET /v1/tenants", tenantHandler.ListTenants)
-	mux.HandleFunc("GET /v1/tenants/{id}", tenantHandler.GetTenant)
-	mux.HandleFunc("PATCH /v1/tenants/{id}", tenantHandler.UpdateTenant)
-	mux.HandleFunc("POST /v1/tenants/{id}/deactivate", tenantHandler.DeactivateTenant)
-	mux.HandleFunc("POST /v1/tenants/{id}/reactivate", tenantHandler.ReactivateTenant)
+	mux.HandleFunc("POST /v1/tenants", authorizer.RequirePlatform("tenant.create", tenantHandler.CreateTenant))
+	mux.HandleFunc("GET /v1/tenants", authorizer.RequirePlatform("tenant.read", tenantHandler.ListTenants))
+	mux.HandleFunc("GET /v1/tenants/{id}", authorizer.RequireTenant("id", "tenant.read", tenantHandler.GetTenant))
+	mux.HandleFunc("PATCH /v1/tenants/{id}", authorizer.RequireTenant("id", "tenant.update", tenantHandler.UpdateTenant))
+	mux.HandleFunc("POST /v1/tenants/{id}/deactivate", authorizer.RequirePlatform("tenant.deactivate", tenantHandler.DeactivateTenant))
+	mux.HandleFunc("POST /v1/tenants/{id}/reactivate", authorizer.RequirePlatform("tenant.reactivate", tenantHandler.ReactivateTenant))
 
 	// Tenant User / Membership routes
-	mux.HandleFunc("POST /v1/tenants/{tenantID}/users", tenantUserHandler.ProvisionUser)
-	mux.HandleFunc("GET /v1/tenants/{tenantID}/users", tenantUserHandler.ListUsers)
-	mux.HandleFunc("GET /v1/tenants/{tenantID}/users/{userID}", tenantUserHandler.GetUser)
-	mux.HandleFunc("POST /v1/tenants/{tenantID}/members", tenantUserHandler.AddMember)
-	mux.HandleFunc("PATCH /v1/tenants/{tenantID}/users/{userID}/role", tenantUserHandler.ChangeRole)
-	mux.HandleFunc("DELETE /v1/tenants/{tenantID}/users/{userID}", tenantUserHandler.RemoveMember)
+	mux.HandleFunc("POST /v1/tenants/{tenantID}/users", authorizer.RequireTenant("tenantID", "user.create", tenantUserHandler.ProvisionUser))
+	mux.HandleFunc("GET /v1/tenants/{tenantID}/users", authorizer.RequireTenant("tenantID", "user.read", tenantUserHandler.ListUsers))
+	mux.HandleFunc("GET /v1/tenants/{tenantID}/users/{userID}", authorizer.RequireTenant("tenantID", "user.read", tenantUserHandler.GetUser))
+	mux.HandleFunc("POST /v1/tenants/{tenantID}/members", authorizer.RequireTenant("tenantID", "user.assign_role", tenantUserHandler.AddMember))
+	mux.HandleFunc("PATCH /v1/tenants/{tenantID}/users/{userID}/role", authorizer.RequireTenant("tenantID", "user.assign_role", tenantUserHandler.ChangeRole))
+	mux.HandleFunc("DELETE /v1/tenants/{tenantID}/users/{userID}", authorizer.RequireTenant("tenantID", "user.delete", tenantUserHandler.RemoveMember))
 
 	// User routes
 	mux.HandleFunc("POST /v1/users", userHandler.CreateUser)
 	mux.HandleFunc("GET /v1/users/{id}", userHandler.GetUser)
-	mux.HandleFunc("POST /v1/users/{id}/deactivate", userHandler.DeactivateUser)
-	mux.HandleFunc("POST /v1/users/{id}/reactivate", userHandler.ReactivateUser)
+	mux.HandleFunc("POST /v1/users/{id}/deactivate", authorizer.RequirePlatform("user.deactivate", userHandler.DeactivateUser))
+	mux.HandleFunc("POST /v1/users/{id}/reactivate", authorizer.RequirePlatform("user.reactivate", userHandler.ReactivateUser))
 
 	server := &http.Server{
 		Addr:         cfg.HTTPAddr,

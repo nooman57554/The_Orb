@@ -26,4 +26,7 @@ type AuthorizationRepository interface {
 
 	// CountActiveTenantAdmins counts the number of active users with administrative privileges in a tenant.
 	CountActiveTenantAdmins(ctx context.Context, tenantID uuid.UUID) (int, error)
+
+	// IsUserActive checks whether a user exists and is active.
+	IsUserActive(ctx context.Context, userID uuid.UUID) (bool, error)
 }

@@ -221,9 +221,9 @@ func (h *TenantHandler) GetTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tenant, err := h.tenantRepo.GetByID(r.Context(), tenantID)
+	tenant, err := h.tenantService.GetTenantByID(r.Context(), tenantID)
 	if err != nil {
-		if errors.Is(err, repository.ErrNotFound) {
+		if errors.Is(err, service.ErrTenantNotFound) || errors.Is(err, repository.ErrNotFound) {
 			httpx.WriteProblem(
 				w,
 				http.StatusNotFound,
@@ -317,9 +317,9 @@ func (h *TenantHandler) UpdateTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tenant, err := h.tenantRepo.GetByID(r.Context(), tenantID)
+	tenant, err := h.tenantService.UpdateTenant(r.Context(), tenantID, name)
 	if err != nil {
-		if errors.Is(err, repository.ErrNotFound) {
+		if errors.Is(err, service.ErrTenantNotFound) || errors.Is(err, repository.ErrNotFound) {
 			httpx.WriteProblem(
 				w,
 				http.StatusNotFound,
@@ -328,17 +328,6 @@ func (h *TenantHandler) UpdateTenant(w http.ResponseWriter, r *http.Request) {
 			)
 			return
 		}
-		httpx.WriteProblem(
-			w,
-			http.StatusInternalServerError,
-			"Internal Server Error",
-			"An unexpected error occurred.",
-		)
-		return
-	}
-
-	tenant.Name = name
-	if err := h.tenantRepo.Update(r.Context(), tenant); err != nil {
 		httpx.WriteProblem(
 			w,
 			http.StatusInternalServerError,

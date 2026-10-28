@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/nooman57554/The_Orb/orb_libs/identity"
 	"github.com/nooman57554/The_Orb/services/iam/model"
+	"github.com/nooman57554/The_Orb/services/iam/repository"
 	"github.com/nooman57554/The_Orb/services/iam/service"
 )
 
@@ -93,10 +94,7 @@ func (m *mockAuthorizationRepository) GetTenantRole(ctx context.Context, userID,
 	if m.tenantRoles != nil && m.tenantRoles[userID] != nil && m.tenantRoles[userID][tenantID] != nil {
 		return m.tenantRoles[userID][tenantID], nil
 	}
-	return &model.Role{
-		Name:  "TENANT_ADMIN_RW",
-		Scope: model.RoleScopeSystemTenant,
-	}, nil
+	return nil, repository.ErrNotFound
 }
 
 func (m *mockAuthorizationRepository) CountActiveTenantAdmins(ctx context.Context, tenantID uuid.UUID) (int, error) {
@@ -109,6 +107,13 @@ func (m *mockAuthorizationRepository) CountActiveTenantAdmins(ctx context.Contex
 		}
 	}
 	return 1, nil
+}
+
+func (m *mockAuthorizationRepository) IsUserActive(ctx context.Context, userID uuid.UUID) (bool, error) {
+	if m.forceError {
+		return false, errors.New("database connection refused: i/o timeout")
+	}
+	return true, nil
 }
 
 func TestNewAuthorizationService_NilRepo(t *testing.T) {

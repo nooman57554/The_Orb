@@ -29,24 +29,97 @@ func (r *PostgresRoleAssignmentRepository) AssignTenantRole(
 		return fmt.Errorf("user ID, tenant ID, and role ID are required")
 	}
 
+	tx, err := r.db.Pool().Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Lock the tenant row FOR UPDATE to serialize role assignments in this tenant
+	var lockedTenantID uuid.UUID
+	err = tx.QueryRow(ctx, "SELECT id FROM tenants WHERE id = $1 FOR UPDATE", tenantID).Scan(&lockedTenantID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("tenant: %w", ErrNotFound)
+		}
+		return fmt.Errorf("lock tenant: %w", err)
+	}
+
+	// 1. Check if the new role has tenant admin capabilities
+	const checkNewRoleQuery = `
+		SELECT EXISTS (
+			SELECT 1 FROM roles r
+			LEFT JOIN role_permissions rp ON rp.role_id = r.id
+			LEFT JOIN permissions p ON p.id = rp.permission_id AND p.scope = 'tenant'
+			WHERE r.id = $1 AND (r.name = 'TENANT_ADMIN_RW' OR p.name IN ('user.assign_role', 'role.assign'))
+		)
+	`
+	var newRoleIsAdmin bool
+	if err := tx.QueryRow(ctx, checkNewRoleQuery, roleID).Scan(&newRoleIsAdmin); err != nil {
+		return fmt.Errorf("check new role admin capabilities: %w", err)
+	}
+
+	// 2. Check if the current user assignment in this tenant is an active tenant admin
+	const checkCurrentAdminQuery = `
+		SELECT EXISTS (
+			SELECT 1
+			FROM role_assignments ra
+			JOIN users u ON u.id = ra.user_id
+			JOIN tenants t ON t.id = ra.tenant_id
+			JOIN roles r ON r.id = ra.role_id
+			LEFT JOIN role_permissions rp ON rp.role_id = r.id
+			LEFT JOIN permissions p ON p.id = rp.permission_id AND p.scope = 'tenant'
+			WHERE ra.user_id = $1 AND ra.tenant_id = $2
+			  AND u.status = 'active' AND t.status = 'active'
+			  AND (r.name = 'TENANT_ADMIN_RW' OR p.name IN ('user.assign_role', 'role.assign'))
+		)
+	`
+	var currentIsAdmin bool
+	if err := tx.QueryRow(ctx, checkCurrentAdminQuery, userID, tenantID).Scan(&currentIsAdmin); err != nil {
+		return fmt.Errorf("check current role admin capabilities: %w", err)
+	}
+
+	// 3. If demoting an active admin to a non-admin role, check count
+	if currentIsAdmin && !newRoleIsAdmin {
+		const countQuery = `
+			SELECT COUNT(DISTINCT ra.user_id)
+			FROM role_assignments ra
+			JOIN users u ON u.id = ra.user_id
+			JOIN tenants t ON t.id = ra.tenant_id
+			JOIN roles r ON r.id = ra.role_id
+			LEFT JOIN role_permissions rp ON rp.role_id = r.id
+			LEFT JOIN permissions p ON p.id = rp.permission_id AND p.scope = 'tenant'
+			WHERE ra.tenant_id = $1
+			  AND u.status = 'active'
+			  AND t.status = 'active'
+			  AND (r.name = 'TENANT_ADMIN_RW' OR p.name IN ('user.assign_role', 'role.assign'))
+		`
+		var count int
+		if err := tx.QueryRow(ctx, countQuery, tenantID).Scan(&count); err != nil {
+			return fmt.Errorf("count active tenant admins: %w", err)
+		}
+		if count <= 1 {
+			return ErrLastTenantAdmin
+		}
+	}
+
+	// 4. Upsert assignment
 	id, err := uuid.NewV7()
 	if err != nil {
 		return fmt.Errorf("generate assignment id: %w", err)
 	}
 
-	const query = `
+	const upsertQuery = `
 		INSERT INTO role_assignments (id, user_id, tenant_id, role_id)
 		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (user_id, tenant_id) WHERE tenant_id IS NOT NULL
 		DO UPDATE SET role_id = EXCLUDED.role_id, created_at = NOW()
 	`
-
-	_, err = r.db.Pool().Exec(ctx, query, id, userID, tenantID, roleID)
-	if err != nil {
+	if _, err := tx.Exec(ctx, upsertQuery, id, userID, tenantID, roleID); err != nil {
 		return fmt.Errorf("assign tenant role: %w", err)
 	}
 
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (r *PostgresRoleAssignmentRepository) RemoveTenantRole(
@@ -57,21 +130,78 @@ func (r *PostgresRoleAssignmentRepository) RemoveTenantRole(
 		return fmt.Errorf("user ID and tenant ID are required")
 	}
 
-	const query = `
+	tx, err := r.db.Pool().Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Lock the tenant row FOR UPDATE to serialize role operations in this tenant
+	var lockedTenantID uuid.UUID
+	err = tx.QueryRow(ctx, "SELECT id FROM tenants WHERE id = $1 FOR UPDATE", tenantID).Scan(&lockedTenantID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("tenant: %w", ErrNotFound)
+		}
+		return fmt.Errorf("lock tenant: %w", err)
+	}
+
+	// 1. Check if the current user assignment in this tenant is an active tenant admin
+	const checkCurrentAdminQuery = `
+		SELECT EXISTS (
+			SELECT 1
+			FROM role_assignments ra
+			JOIN users u ON u.id = ra.user_id
+			JOIN tenants t ON t.id = ra.tenant_id
+			JOIN roles r ON r.id = ra.role_id
+			LEFT JOIN role_permissions rp ON rp.role_id = r.id
+			LEFT JOIN permissions p ON p.id = rp.permission_id AND p.scope = 'tenant'
+			WHERE ra.user_id = $1 AND ra.tenant_id = $2
+			  AND u.status = 'active' AND t.status = 'active'
+			  AND (r.name = 'TENANT_ADMIN_RW' OR p.name IN ('user.assign_role', 'role.assign'))
+		)
+	`
+	var currentIsAdmin bool
+	if err := tx.QueryRow(ctx, checkCurrentAdminQuery, userID, tenantID).Scan(&currentIsAdmin); err != nil {
+		return fmt.Errorf("check current role admin capabilities: %w", err)
+	}
+
+	if currentIsAdmin {
+		const countQuery = `
+			SELECT COUNT(DISTINCT ra.user_id)
+			FROM role_assignments ra
+			JOIN users u ON u.id = ra.user_id
+			JOIN tenants t ON t.id = ra.tenant_id
+			JOIN roles r ON r.id = ra.role_id
+			LEFT JOIN role_permissions rp ON rp.role_id = r.id
+			LEFT JOIN permissions p ON p.id = rp.permission_id AND p.scope = 'tenant'
+			WHERE ra.tenant_id = $1
+			  AND u.status = 'active'
+			  AND t.status = 'active'
+			  AND (r.name = 'TENANT_ADMIN_RW' OR p.name IN ('user.assign_role', 'role.assign'))
+		`
+		var count int
+		if err := tx.QueryRow(ctx, countQuery, tenantID).Scan(&count); err != nil {
+			return fmt.Errorf("count active tenant admins: %w", err)
+		}
+		if count <= 1 {
+			return ErrLastTenantAdmin
+		}
+	}
+
+	const deleteQuery = `
 		DELETE FROM role_assignments
 		WHERE user_id = $1 AND tenant_id = $2
 	`
-
-	res, err := r.db.Pool().Exec(ctx, query, userID, tenantID)
+	res, err := tx.Exec(ctx, deleteQuery, userID, tenantID)
 	if err != nil {
 		return fmt.Errorf("remove tenant role: %w", err)
 	}
-
 	if res.RowsAffected() == 0 {
 		return fmt.Errorf("membership: %w", ErrNotFound)
 	}
 
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (r *PostgresRoleAssignmentRepository) ListUsersByTenantRole(
@@ -136,24 +266,89 @@ func (r *PostgresRoleAssignmentRepository) AssignPlatformRole(
 		return fmt.Errorf("user ID and role ID are required")
 	}
 
+	tx, err := r.db.Pool().Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Acquire transaction-level advisory lock for platform admin operations
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtext('platform_admin_lock'))"); err != nil {
+		return fmt.Errorf("acquire platform advisory lock: %w", err)
+	}
+
+	// 1. Check if the new role has platform admin capabilities
+	const checkNewRoleQuery = `
+		SELECT EXISTS (
+			SELECT 1 FROM roles r
+			LEFT JOIN role_permissions rp ON rp.role_id = r.id
+			LEFT JOIN permissions p ON p.id = rp.permission_id AND p.scope = 'platform'
+			WHERE r.id = $1 AND r.scope = 'platform' AND (r.name = 'PLATFORM_ADMIN' OR p.name = 'role.assign')
+		)
+	`
+	var newRoleIsAdmin bool
+	if err := tx.QueryRow(ctx, checkNewRoleQuery, roleID).Scan(&newRoleIsAdmin); err != nil {
+		return fmt.Errorf("check new role admin capabilities: %w", err)
+	}
+
+	// 2. Check if the current user assignment is an active platform admin
+	const checkCurrentAdminQuery = `
+		SELECT EXISTS (
+			SELECT 1
+			FROM role_assignments ra
+			JOIN users u ON u.id = ra.user_id
+			JOIN roles r ON r.id = ra.role_id
+			LEFT JOIN role_permissions rp ON rp.role_id = r.id
+			LEFT JOIN permissions p ON p.id = rp.permission_id AND p.scope = 'platform'
+			WHERE ra.user_id = $1 AND ra.tenant_id IS NULL AND u.status = 'active'
+			  AND (r.name = 'PLATFORM_ADMIN' OR p.name = 'role.assign')
+		)
+	`
+	var currentIsAdmin bool
+	if err := tx.QueryRow(ctx, checkCurrentAdminQuery, userID).Scan(&currentIsAdmin); err != nil {
+		return fmt.Errorf("check current role admin capabilities: %w", err)
+	}
+
+	// 3. If demoting an active admin to a non-admin role, check count
+	if currentIsAdmin && !newRoleIsAdmin {
+		const countQuery = `
+			SELECT COUNT(DISTINCT ra.user_id)
+			FROM role_assignments ra
+			JOIN users u ON u.id = ra.user_id
+			JOIN roles r ON r.id = ra.role_id
+			LEFT JOIN role_permissions rp ON rp.role_id = r.id
+			LEFT JOIN permissions p ON p.id = rp.permission_id AND p.scope = 'platform'
+			WHERE ra.tenant_id IS NULL
+			  AND u.status = 'active'
+			  AND r.scope = 'platform'
+			  AND (r.name = 'PLATFORM_ADMIN' OR p.name = 'role.assign')
+		`
+		var count int
+		if err := tx.QueryRow(ctx, countQuery).Scan(&count); err != nil {
+			return fmt.Errorf("count platform admins: %w", err)
+		}
+		if count <= 1 {
+			return ErrLastPlatformAdmin
+		}
+	}
+
+	// 4. Upsert assignment
 	id, err := uuid.NewV7()
 	if err != nil {
 		return fmt.Errorf("generate assignment id: %w", err)
 	}
 
-	const query = `
+	const upsertQuery = `
 		INSERT INTO role_assignments (id, user_id, tenant_id, role_id)
 		VALUES ($1, $2, NULL, $3)
 		ON CONFLICT (user_id) WHERE tenant_id IS NULL
 		DO UPDATE SET role_id = EXCLUDED.role_id, created_at = NOW()
 	`
-
-	_, err = r.db.Pool().Exec(ctx, query, id, userID, roleID)
-	if err != nil {
+	if _, err := tx.Exec(ctx, upsertQuery, id, userID, roleID); err != nil {
 		return fmt.Errorf("assign platform role: %w", err)
 	}
 
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (r *PostgresRoleAssignmentRepository) RemovePlatformRole(
@@ -164,21 +359,70 @@ func (r *PostgresRoleAssignmentRepository) RemovePlatformRole(
 		return fmt.Errorf("user ID is required")
 	}
 
-	const query = `
+	tx, err := r.db.Pool().Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Acquire transaction-level advisory lock for platform admin operations
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtext('platform_admin_lock'))"); err != nil {
+		return fmt.Errorf("acquire platform advisory lock: %w", err)
+	}
+
+	// 1. Check if user has an active platform role assignment
+	const checkCurrentAdminQuery = `
+		SELECT EXISTS (
+			SELECT 1
+			FROM role_assignments ra
+			JOIN users u ON u.id = ra.user_id
+			JOIN roles r ON r.id = ra.role_id
+			LEFT JOIN role_permissions rp ON rp.role_id = r.id
+			LEFT JOIN permissions p ON p.id = rp.permission_id AND p.scope = 'platform'
+			WHERE ra.user_id = $1 AND ra.tenant_id IS NULL AND u.status = 'active'
+			  AND (r.name = 'PLATFORM_ADMIN' OR p.name = 'role.assign')
+		)
+	`
+	var currentIsAdmin bool
+	if err := tx.QueryRow(ctx, checkCurrentAdminQuery, userID).Scan(&currentIsAdmin); err != nil {
+		return fmt.Errorf("check current role admin capabilities: %w", err)
+	}
+
+	if currentIsAdmin {
+		const countQuery = `
+			SELECT COUNT(DISTINCT ra.user_id)
+			FROM role_assignments ra
+			JOIN users u ON u.id = ra.user_id
+			JOIN roles r ON r.id = ra.role_id
+			LEFT JOIN role_permissions rp ON rp.role_id = r.id
+			LEFT JOIN permissions p ON p.id = rp.permission_id AND p.scope = 'platform'
+			WHERE ra.tenant_id IS NULL
+			  AND u.status = 'active'
+			  AND r.scope = 'platform'
+			  AND (r.name = 'PLATFORM_ADMIN' OR p.name = 'role.assign')
+		`
+		var count int
+		if err := tx.QueryRow(ctx, countQuery).Scan(&count); err != nil {
+			return fmt.Errorf("count platform admins: %w", err)
+		}
+		if count <= 1 {
+			return ErrLastPlatformAdmin
+		}
+	}
+
+	const deleteQuery = `
 		DELETE FROM role_assignments
 		WHERE user_id = $1 AND tenant_id IS NULL
 	`
-
-	res, err := r.db.Pool().Exec(ctx, query, userID)
+	res, err := tx.Exec(ctx, deleteQuery, userID)
 	if err != nil {
 		return fmt.Errorf("remove platform role: %w", err)
 	}
-
 	if res.RowsAffected() == 0 {
 		return fmt.Errorf("platform role assignment: %w", ErrNotFound)
 	}
 
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (r *PostgresRoleAssignmentRepository) GetPlatformRole(
@@ -227,14 +471,16 @@ func (r *PostgresRoleAssignmentRepository) CountPlatformAdmins(
 	ctx context.Context,
 ) (int, error) {
 	const query = `
-		SELECT COUNT(*)
+		SELECT COUNT(DISTINCT ra.user_id)
 		FROM role_assignments ra
 		JOIN users u ON u.id = ra.user_id
 		JOIN roles r ON r.id = ra.role_id
+		LEFT JOIN role_permissions rp ON rp.role_id = r.id
+		LEFT JOIN permissions p ON p.id = rp.permission_id AND p.scope = 'platform'
 		WHERE ra.tenant_id IS NULL
 		  AND u.status = 'active'
 		  AND r.scope = 'platform'
-		  AND r.name = 'PLATFORM_ADMIN'
+		  AND (r.name = 'PLATFORM_ADMIN' OR p.name = 'role.assign')
 	`
 
 	var count int

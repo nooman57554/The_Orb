@@ -21,6 +21,7 @@ var (
 	ErrCannotRemoveLastPlatformAdmin = errors.New("cannot remove or demote the last active platform administrator")
 	ErrInvalidPlatformRole           = errors.New("role is not a valid platform role")
 	ErrCannotDelegateRole            = errors.New("insufficient authority to delegate one or more permissions in the role")
+	ErrRoleHasAssignments            = repository.ErrRoleHasAssignments
 )
 
 type RoleService struct {
@@ -38,6 +39,9 @@ func NewRoleService(
 	authzService *AuthorizationService,
 	userRepo repository.UserRepository,
 ) (*RoleService, error) {
+	if roleRepo == nil || permRepo == nil || roleAssignRepo == nil || authzService == nil || userRepo == nil {
+		return nil, fmt.Errorf("role service dependencies are required")
+	}
 
 	return &RoleService{
 		roleRepo:       roleRepo,
@@ -204,9 +208,7 @@ func (s *RoleService) AssignPlatformRole(
 	targetUserID uuid.UUID,
 	roleID uuid.UUID,
 ) error {
-	if actor == nil || !actor.IsValid() {
-		return ErrUnauthorized
-	}
+
 	if targetUserID == uuid.Nil || roleID == uuid.Nil {
 		return fmt.Errorf("target user ID and role ID are required")
 	}
@@ -248,6 +250,9 @@ func (s *RoleService) AssignPlatformRole(
 	// 5. If target user currently has PLATFORM_ADMIN and the new role is not PLATFORM_ADMIN,
 	// protect against removing/demoting the last active platform admin
 	currentRole, err := s.roleAssignRepo.GetPlatformRole(ctx, targetUserID)
+	if err != nil && !errors.Is(err, repository.ErrNotFound) {
+		return fmt.Errorf("get current platform role: %w", err)
+	}
 	if err == nil && currentRole != nil && currentRole.Name == "PLATFORM_ADMIN" && targetRole.Name != "PLATFORM_ADMIN" {
 		count, err := s.roleAssignRepo.CountPlatformAdmins(ctx)
 		if err != nil {
@@ -258,7 +263,13 @@ func (s *RoleService) AssignPlatformRole(
 		}
 	}
 
-	return s.roleAssignRepo.AssignPlatformRole(ctx, targetUserID, roleID)
+	if err := s.roleAssignRepo.AssignPlatformRole(ctx, targetUserID, roleID); err != nil {
+		if errors.Is(err, repository.ErrLastPlatformAdmin) {
+			return ErrCannotRemoveLastPlatformAdmin
+		}
+		return err
+	}
+	return nil
 }
 
 // RemovePlatformRole allows an authorized platform admin to remove another user's platform role.
@@ -267,9 +278,7 @@ func (s *RoleService) RemovePlatformRole(
 	actor *identity.Principal,
 	targetUserID uuid.UUID,
 ) error {
-	if actor == nil || !actor.IsValid() {
-		return ErrUnauthorized
-	}
+
 	if targetUserID == uuid.Nil {
 		return fmt.Errorf("target user ID is required")
 	}
@@ -304,7 +313,24 @@ func (s *RoleService) RemovePlatformRole(
 		}
 	}
 
-	return s.roleAssignRepo.RemovePlatformRole(ctx, targetUserID)
+	if err := s.roleAssignRepo.RemovePlatformRole(ctx, targetUserID); err != nil {
+		if errors.Is(err, repository.ErrLastPlatformAdmin) {
+			return ErrCannotRemoveLastPlatformAdmin
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *RoleService) ListPermissions(ctx context.Context) ([]model.Permission, error) {
+	return s.permRepo.ListAll(ctx)
+}
+
+func (s *RoleService) ListUsersByRole(ctx context.Context, tenantID, roleID uuid.UUID) ([]model.TenantMemberRecord, error) {
+	if tenantID == uuid.Nil || roleID == uuid.Nil {
+		return nil, fmt.Errorf("tenant ID and role ID are required")
+	}
+	return s.roleAssignRepo.ListUsersByTenantRole(ctx, tenantID, roleID)
 }
 
 // GetPlatformRole returns a user's current platform role, if any.

@@ -36,7 +36,7 @@ func (r *PostgresAuthorizationRepository) HasPlatformPermission(
 			FROM role_assignments ra
 			JOIN roles r ON r.id = ra.role_id AND r.scope = 'platform'
 			JOIN role_permissions rp ON rp.role_id = r.id
-			JOIN permissions p ON p.id = rp.permission_id
+			JOIN permissions p ON p.id = rp.permission_id AND p.scope = 'platform'
 			JOIN users u ON u.id = ra.user_id
 			WHERE ra.user_id = $1
 			  AND ra.tenant_id IS NULL
@@ -70,7 +70,7 @@ func (r *PostgresAuthorizationRepository) HasTenantPermission(
 			FROM role_assignments ra
 			JOIN roles r ON r.id = ra.role_id AND r.scope IN ('system_tenant', 'custom_tenant')
 			JOIN role_permissions rp ON rp.role_id = r.id
-			JOIN permissions p ON p.id = rp.permission_id
+			JOIN permissions p ON p.id = rp.permission_id AND p.scope = 'tenant'
 			JOIN users u ON u.id = ra.user_id
 			JOIN tenants t ON t.id = ra.tenant_id
 			WHERE ra.user_id = $1
@@ -177,12 +177,12 @@ func (r *PostgresAuthorizationRepository) CountActiveTenantAdmins(
 		JOIN users u ON u.id = ra.user_id
 		JOIN tenants t ON t.id = ra.tenant_id
 		JOIN roles r ON r.id = ra.role_id
-		JOIN role_permissions rp ON rp.role_id = r.id
-		JOIN permissions p ON p.id = rp.permission_id
+		LEFT JOIN role_permissions rp ON rp.role_id = r.id
+		LEFT JOIN permissions p ON p.id = rp.permission_id AND p.scope = 'tenant'
 		WHERE ra.tenant_id = $1
 		  AND u.status = 'active'
 		  AND t.status = 'active'
-		  AND p.name IN ('user.assign_role', 'role.assign')
+		  AND (r.name = 'TENANT_ADMIN_RW' OR p.name IN ('user.assign_role', 'role.assign'))
 	`
 
 	var count int
@@ -192,4 +192,28 @@ func (r *PostgresAuthorizationRepository) CountActiveTenantAdmins(
 	}
 
 	return count, nil
+}
+
+func (r *PostgresAuthorizationRepository) IsUserActive(
+	ctx context.Context,
+	userID uuid.UUID,
+) (bool, error) {
+	if userID == uuid.Nil {
+		return false, nil
+	}
+
+	const query = `
+		SELECT EXISTS (
+			SELECT 1 FROM users
+			WHERE id = $1 AND status = 'active'
+		)
+	`
+
+	var active bool
+	err := r.db.Pool().QueryRow(ctx, query, userID).Scan(&active)
+	if err != nil {
+		return false, fmt.Errorf("check user active: %w", err)
+	}
+
+	return active, nil
 }

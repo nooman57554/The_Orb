@@ -23,12 +23,16 @@ type RoleHandler struct {
 func NewRoleHandler(
 	roleService *service.RoleService,
 	authzService *service.AuthorizationService,
-	roleAssignRepo repository.RoleAssignmentRepository,
+	roleAssignRepo ...repository.RoleAssignmentRepository,
 ) *RoleHandler {
+	var repo repository.RoleAssignmentRepository
+	if len(roleAssignRepo) > 0 {
+		repo = roleAssignRepo[0]
+	}
 	return &RoleHandler{
 		roleService:    roleService,
 		authzService:   authzService,
-		roleAssignRepo: roleAssignRepo,
+		roleAssignRepo: repo,
 	}
 }
 
@@ -437,7 +441,7 @@ func (h *RoleHandler) ListUsersByRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	members, err := h.roleAssignRepo.ListUsersByTenantRole(r.Context(), tenantID, roleID)
+	members, err := h.roleService.ListUsersByRole(r.Context(), tenantID, roleID)
 	if err != nil {
 		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
 		return

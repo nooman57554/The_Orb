@@ -39,26 +39,8 @@ func NewTenantUserService(
 	sessionRepo repository.SessionRepository,
 	authzService *AuthorizationService,
 ) (*TenantUserService, error) {
-	if userRepo == nil {
-		return nil, fmt.Errorf("user repository is required")
-	}
-	if tenantRepo == nil {
-		return nil, fmt.Errorf("tenant repository is required")
-	}
-	if roleRepo == nil {
-		return nil, fmt.Errorf("role repository is required")
-	}
-	if roleAssignRepo == nil {
-		return nil, fmt.Errorf("role assignment repository is required")
-	}
-	if authzRepo == nil {
-		return nil, fmt.Errorf("authorization repository is required")
-	}
-	if sessionRepo == nil {
-		return nil, fmt.Errorf("session repository is required")
-	}
-	if authzService == nil {
-		return nil, fmt.Errorf("authorization service is required")
+	if userRepo == nil || tenantRepo == nil || roleRepo == nil || roleAssignRepo == nil || authzRepo == nil || sessionRepo == nil || authzService == nil {
+		return nil, fmt.Errorf("tenant user service dependencies are required")
 	}
 
 	return &TenantUserService{
@@ -100,9 +82,6 @@ func (s *TenantUserService) checkRoleDelegation(
 	tenantID uuid.UUID,
 	targetRole *model.Role,
 ) error {
-	if actor == nil || !actor.IsValid() {
-		return ErrUnauthorized
-	}
 
 	// 1. If actor is Platform Admin, they hold platform-wide role.assign and may assign any valid tenant role
 	isPlatformAdmin, err := s.authzRepo.HasPlatformPermission(ctx, actor.UserID, "role.assign")
@@ -181,9 +160,6 @@ func (s *TenantUserService) ProvisionTenantUser(
 	email, password string,
 	roleID uuid.UUID,
 ) (*model.TenantMemberRecord, error) {
-	if actor == nil || !actor.IsValid() {
-		return nil, ErrUnauthorized
-	}
 	if tenantID == uuid.Nil || roleID == uuid.Nil {
 		return nil, fmt.Errorf("tenant ID and role ID are required")
 	}
@@ -239,9 +215,6 @@ func (s *TenantUserService) AddTenantMember(
 	actor *identity.Principal,
 	tenantID, userID, roleID uuid.UUID,
 ) (*model.TenantMemberRecord, error) {
-	if actor == nil || !actor.IsValid() {
-		return nil, ErrUnauthorized
-	}
 	if tenantID == uuid.Nil || userID == uuid.Nil || roleID == uuid.Nil {
 		return nil, fmt.Errorf("tenant ID, user ID, and role ID are required")
 	}
@@ -295,9 +268,6 @@ func (s *TenantUserService) ChangeTenantUserRole(
 	actor *identity.Principal,
 	tenantID, userID, newRoleID uuid.UUID,
 ) (*model.TenantMemberRecord, error) {
-	if actor == nil || !actor.IsValid() {
-		return nil, ErrUnauthorized
-	}
 	if tenantID == uuid.Nil || userID == uuid.Nil || newRoleID == uuid.Nil {
 		return nil, fmt.Errorf("tenant ID, user ID, and role ID are required")
 	}
@@ -333,16 +303,18 @@ func (s *TenantUserService) ChangeTenantUserRole(
 
 	if len(currentRole.Permissions) == 0 && currentRole.ID != uuid.Nil {
 		perms, err := s.roleRepo.GetRolePermissions(ctx, currentRole.ID)
-		if err == nil {
-			currentRole.Permissions = perms
+		if err != nil {
+			return nil, fmt.Errorf("get current role permissions: %w", err)
 		}
+		currentRole.Permissions = perms
 	}
 
 	if len(newRole.Permissions) == 0 && newRole.ID != uuid.Nil {
 		newPerms, err := s.roleRepo.GetRolePermissions(ctx, newRole.ID)
-		if err == nil {
-			newRole.Permissions = newPerms
+		if err != nil {
+			return nil, fmt.Errorf("get new role permissions: %w", err)
 		}
+		newRole.Permissions = newPerms
 	}
 
 	// If currently an admin and new role is NOT an admin, check last admin protection
@@ -357,6 +329,9 @@ func (s *TenantUserService) ChangeTenantUserRole(
 	}
 
 	if err := s.roleAssignRepo.AssignTenantRole(ctx, userID, tenantID, newRoleID); err != nil {
+		if errors.Is(err, repository.ErrLastTenantAdmin) {
+			return nil, ErrCannotRemoveLastAdmin
+		}
 		return nil, fmt.Errorf("update tenant role: %w", err)
 	}
 
@@ -369,9 +344,6 @@ func (s *TenantUserService) RemoveTenantMember(
 	actor *identity.Principal,
 	tenantID, userID uuid.UUID,
 ) error {
-	if actor == nil || !actor.IsValid() {
-		return ErrUnauthorized
-	}
 	if tenantID == uuid.Nil || userID == uuid.Nil {
 		return fmt.Errorf("tenant ID and user ID are required")
 	}
@@ -386,9 +358,10 @@ func (s *TenantUserService) RemoveTenantMember(
 
 	if len(currentRole.Permissions) == 0 && currentRole.ID != uuid.Nil {
 		perms, err := s.roleRepo.GetRolePermissions(ctx, currentRole.ID)
-		if err == nil {
-			currentRole.Permissions = perms
+		if err != nil {
+			return fmt.Errorf("get role permissions: %w", err)
 		}
+		currentRole.Permissions = perms
 	}
 
 	if s.isRoleAdmin(currentRole) {
@@ -403,6 +376,9 @@ func (s *TenantUserService) RemoveTenantMember(
 
 	// Removing tenant membership deletes the role assignment row, not the global user
 	if err := s.roleAssignRepo.RemoveTenantRole(ctx, userID, tenantID); err != nil {
+		if errors.Is(err, repository.ErrLastTenantAdmin) {
+			return ErrCannotRemoveLastAdmin
+		}
 		if errors.Is(err, repository.ErrNotFound) {
 			return ErrMemberNotFound
 		}

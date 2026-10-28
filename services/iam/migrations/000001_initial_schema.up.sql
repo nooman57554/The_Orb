@@ -103,6 +103,23 @@ CREATE TRIGGER set_timestamp_roles
 BEFORE UPDATE ON roles
 FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
 
+CREATE OR REPLACE FUNCTION check_role_immutability()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.scope != OLD.scope THEN
+        RAISE EXCEPTION 'role scope is immutable';
+    END IF;
+    IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id THEN
+        RAISE EXCEPTION 'role tenant_id is immutable';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_check_role_immutability
+BEFORE UPDATE ON roles
+FOR EACH ROW EXECUTE FUNCTION check_role_immutability();
+
 CREATE UNIQUE INDEX uq_platform_role_name
     ON roles(name)
     WHERE scope = 'platform';
@@ -156,6 +173,27 @@ CREATE TABLE role_permissions (
 
 CREATE INDEX idx_role_permissions_permission_id ON role_permissions(permission_id);
 
+CREATE OR REPLACE FUNCTION check_role_permission_invariants()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_role_scope TEXT;
+    v_perm_scope TEXT;
+BEGIN
+    SELECT scope INTO v_role_scope FROM roles WHERE id = NEW.role_id;
+    SELECT scope INTO v_perm_scope FROM permissions WHERE id = NEW.permission_id;
+
+    IF v_role_scope IN ('system_tenant', 'custom_tenant') AND v_perm_scope != 'tenant' THEN
+        RAISE EXCEPTION 'Cannot assign platform permission % to tenant role %', NEW.permission_id, NEW.role_id;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_check_role_permission_invariants
+BEFORE INSERT OR UPDATE ON role_permissions
+FOR EACH ROW EXECUTE FUNCTION check_role_permission_invariants();
+
 
 -- ============================================================
 -- ROLE ASSIGNMENTS
@@ -170,7 +208,7 @@ CREATE TABLE role_assignments (
 
     role_id UUID NOT NULL
         REFERENCES roles(id)
-        ON DELETE CASCADE,
+        ON DELETE RESTRICT,
 
     tenant_id UUID
         REFERENCES tenants(id)
