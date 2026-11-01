@@ -71,7 +71,7 @@ func (s *UserService) CreateUser(
 		return nil, ErrUserAlreadyExists
 	}
 
-	passwordHash, err := hashPassword(input.Password)
+	passwordHash, err := HashPassword(input.Password)
 	if err != nil {
 		return nil, fmt.Errorf("hash password: %w", err)
 	}
@@ -93,7 +93,7 @@ func (s *UserService) CreateUser(
 	return user, nil
 }
 
-func hashPassword(password string) (string, error) {
+func HashPassword(password string) (string, error) {
 	salt := make([]byte, argon2SaltLength)
 
 	if _, err := rand.Read(salt); err != nil {

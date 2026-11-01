@@ -103,6 +103,23 @@ CREATE TRIGGER set_timestamp_roles
 BEFORE UPDATE ON roles
 FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
 
+CREATE OR REPLACE FUNCTION check_role_immutability()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.scope != OLD.scope THEN
+        RAISE EXCEPTION 'role scope is immutable';
+    END IF;
+    IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id THEN
+        RAISE EXCEPTION 'role tenant_id is immutable';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_check_role_immutability
+BEFORE UPDATE ON roles
+FOR EACH ROW EXECUTE FUNCTION check_role_immutability();
+
 CREATE UNIQUE INDEX uq_platform_role_name
     ON roles(name)
     WHERE scope = 'platform';
@@ -128,9 +145,13 @@ CREATE TABLE permissions (
     id UUID PRIMARY KEY,
 
     name TEXT NOT NULL UNIQUE,
+    scope TEXT NOT NULL DEFAULT 'tenant',
     description TEXT,
 
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT permissions_scope_check
+        CHECK (scope IN ('platform', 'tenant'))
 );
 
 
@@ -152,49 +173,107 @@ CREATE TABLE role_permissions (
 
 CREATE INDEX idx_role_permissions_permission_id ON role_permissions(permission_id);
 
+CREATE OR REPLACE FUNCTION check_role_permission_invariants()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_role_scope TEXT;
+    v_perm_scope TEXT;
+BEGIN
+    SELECT scope INTO v_role_scope FROM roles WHERE id = NEW.role_id;
+    SELECT scope INTO v_perm_scope FROM permissions WHERE id = NEW.permission_id;
+
+    IF v_role_scope IN ('system_tenant', 'custom_tenant') AND v_perm_scope != 'tenant' THEN
+        RAISE EXCEPTION 'Cannot assign platform permission % to tenant role %', NEW.permission_id, NEW.role_id;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_check_role_permission_invariants
+BEFORE INSERT OR UPDATE ON role_permissions
+FOR EACH ROW EXECUTE FUNCTION check_role_permission_invariants();
+
 
 -- ============================================================
--- PLATFORM ROLE ASSIGNMENTS
+-- ROLE ASSIGNMENTS
 -- ============================================================
 
-CREATE TABLE platform_role_assignments (
-    user_id UUID PRIMARY KEY
+CREATE TABLE role_assignments (
+    id UUID PRIMARY KEY,
+
+    user_id UUID NOT NULL
         REFERENCES users(id)
         ON DELETE CASCADE,
 
     role_id UUID NOT NULL
         REFERENCES roles(id)
+        ON DELETE RESTRICT,
+
+    tenant_id UUID
+        REFERENCES tenants(id)
         ON DELETE CASCADE,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_platform_role_assignments_role_id ON platform_role_assignments(role_id);
+-- At most one platform-wide role per user (tenant_id IS NULL)
+CREATE UNIQUE INDEX uq_role_assignments_platform_user
+    ON role_assignments (user_id)
+    WHERE tenant_id IS NULL;
 
+-- At most one role per user per tenant (tenant_id IS NOT NULL)
+CREATE UNIQUE INDEX uq_role_assignments_tenant_user
+    ON role_assignments (user_id, tenant_id)
+    WHERE tenant_id IS NOT NULL;
 
--- ============================================================
--- TENANT ROLE ASSIGNMENTS
--- ============================================================
+CREATE INDEX idx_role_assignments_user_id ON role_assignments(user_id);
+CREATE INDEX idx_role_assignments_role_id ON role_assignments(role_id);
+CREATE INDEX idx_role_assignments_tenant_id ON role_assignments(tenant_id)
+    WHERE tenant_id IS NOT NULL;
 
-CREATE TABLE tenant_role_assignments (
-    user_id UUID NOT NULL
-        REFERENCES users(id)
-        ON DELETE CASCADE,
+-- Invariant Trigger: Enforce scope and custom tenant ownership at DB level
+CREATE OR REPLACE FUNCTION check_role_assignment_invariants()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_role_scope TEXT;
+    v_role_tenant_id UUID;
+BEGIN
+    SELECT scope, tenant_id INTO v_role_scope, v_role_tenant_id
+    FROM roles
+    WHERE id = NEW.role_id;
 
-    tenant_id UUID NOT NULL
-        REFERENCES tenants(id)
-        ON DELETE CASCADE,
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Referenced role % does not exist', NEW.role_id;
+    END IF;
 
-    role_id UUID NOT NULL
-        REFERENCES roles(id)
-        ON DELETE CASCADE,
+    IF v_role_scope = 'platform' THEN
+        IF NEW.tenant_id IS NOT NULL THEN
+            RAISE EXCEPTION 'Platform role assignment must have tenant_id NULL';
+        END IF;
+    ELSIF v_role_scope = 'system_tenant' THEN
+        IF NEW.tenant_id IS NULL THEN
+            RAISE EXCEPTION 'System tenant role assignment must have non-null tenant_id';
+        END IF;
+    ELSIF v_role_scope = 'custom_tenant' THEN
+        IF NEW.tenant_id IS NULL THEN
+            RAISE EXCEPTION 'Custom tenant role assignment must have non-null tenant_id';
+        END IF;
+        IF NEW.tenant_id != v_role_tenant_id THEN
+            RAISE EXCEPTION 'Custom tenant role % belongs to tenant %, not assigned tenant %',
+                NEW.role_id, v_role_tenant_id, NEW.tenant_id;
+        END IF;
+    ELSE
+        RAISE EXCEPTION 'Unknown role scope %', v_role_scope;
+    END IF;
 
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
 
-    PRIMARY KEY (user_id, tenant_id)
-);
-
-CREATE INDEX idx_tenant_role_assignments_tenant_id ON tenant_role_assignments(tenant_id);
+CREATE TRIGGER trg_check_role_assignment_invariants
+BEFORE INSERT OR UPDATE ON role_assignments
+FOR EACH ROW EXECUTE FUNCTION check_role_assignment_invariants();
 
 
 -- ============================================================

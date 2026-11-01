@@ -178,6 +178,18 @@ func (m *mockSessionRepository) IsActive(ctx context.Context, sessionID uuid.UUI
 	return true, nil
 }
 
+func (m *mockSessionRepository) RevokeAllByUserID(ctx context.Context, userID uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	for _, s := range m.sessionsByID {
+		if s.UserID == userID && s.RevokedAt == nil {
+			s.RevokedAt = &now
+		}
+	}
+	return nil
+}
+
 type authTestFixture struct {
 	userRepo         *mockUserRepositoryWithDBErrors
 	sessionRepo      *mockSessionRepository

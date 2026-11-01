@@ -16,12 +16,24 @@ import (
 )
 
 type UserHandler struct {
-	userService *service.UserService
+	userService       *service.UserService
+	authzService      *service.AuthorizationService
+	tenantUserService *service.TenantUserService
 }
 
-func NewUserHandler(userService *service.UserService) *UserHandler {
+func NewUserHandler(
+	userService *service.UserService,
+	authzService *service.AuthorizationService,
+	tenantUserService ...*service.TenantUserService,
+) *UserHandler {
+	var tus *service.TenantUserService
+	if len(tenantUserService) > 0 && tenantUserService[0] != nil {
+		tus = tenantUserService[0]
+	}
 	return &UserHandler{
-		userService: userService,
+		userService:       userService,
+		authzService:      authzService,
+		tenantUserService: tus,
 	}
 }
 
@@ -162,12 +174,30 @@ func (h *UserHandler) GetUser(
 		return
 	}
 
-	if principal.UserID != userID {
+	if err := h.authzService.AuthorizeUserRead(r.Context(), principal, userID); err != nil {
+		if errors.Is(err, service.ErrUnauthorized) {
+			httpx.WriteProblem(
+				w,
+				http.StatusUnauthorized,
+				"Unauthorized",
+				"Authentication is required.",
+			)
+			return
+		}
+		if errors.Is(err, service.ErrForbidden) {
+			httpx.WriteProblem(
+				w,
+				http.StatusForbidden,
+				"Forbidden",
+				"You are not authorized to access this resource.",
+			)
+			return
+		}
 		httpx.WriteProblem(
 			w,
-			http.StatusForbidden,
-			"Forbidden",
-			"You are not authorized to access this resource.",
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			"An unexpected error occurred.",
 		)
 		return
 	}
@@ -211,4 +241,90 @@ func (h *UserHandler) GetUser(
 	w.WriteHeader(http.StatusOK)
 
 	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (h *UserHandler) DeactivateUser(w http.ResponseWriter, r *http.Request) {
+	principal, ok := identity.PrincipalFromContext(r.Context())
+	if !ok {
+		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
+		return
+	}
+
+	userID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "User ID must be a valid UUID.")
+		return
+	}
+
+	if err := h.authzService.AuthorizePlatform(r.Context(), principal, "user.deactivate"); err != nil {
+		if errors.Is(err, service.ErrUnauthorized) {
+			httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
+			return
+		}
+		if errors.Is(err, service.ErrForbidden) {
+			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You are not authorized to deactivate users.")
+			return
+		}
+		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
+		return
+	}
+
+	if h.tenantUserService == nil {
+		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "User service unconfigured.")
+		return
+	}
+
+	if err := h.tenantUserService.DeactivateUser(r.Context(), userID); err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			httpx.WriteProblem(w, http.StatusNotFound, "User Not Found", "The requested user was not found.")
+			return
+		}
+		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *UserHandler) ReactivateUser(w http.ResponseWriter, r *http.Request) {
+	principal, ok := identity.PrincipalFromContext(r.Context())
+	if !ok {
+		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
+		return
+	}
+
+	userID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "User ID must be a valid UUID.")
+		return
+	}
+
+	if err := h.authzService.AuthorizePlatform(r.Context(), principal, "user.reactivate"); err != nil {
+		if errors.Is(err, service.ErrUnauthorized) {
+			httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
+			return
+		}
+		if errors.Is(err, service.ErrForbidden) {
+			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You are not authorized to reactivate users.")
+			return
+		}
+		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
+		return
+	}
+
+	if h.tenantUserService == nil {
+		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "User service unconfigured.")
+		return
+	}
+
+	if err := h.tenantUserService.ReactivateUser(r.Context(), userID); err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			httpx.WriteProblem(w, http.StatusNotFound, "User Not Found", "The requested user was not found.")
+			return
+		}
+		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
