@@ -2,16 +2,182 @@ package authorization
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/nooman57554/The_Orb/orb_libs/identity"
 )
+
+var (
+	ErrPolicyUnavailable = errors.New("authorization policy is unavailable")
+	ErrPolicyStale       = errors.New("authorization policy is stale")
+	ErrUnknownPermission = errors.New("unknown permission")
+	ErrMissingScope      = errors.New("missing required authorization scope")
+)
+
+// Scope defines the operational boundary of a permission or role.
+type Scope string
+
+const (
+	ScopePlatform Scope = "platform"
+	ScopeTenant   Scope = "tenant"
+)
+
+// Canonical platform permission identifiers.
+const (
+	PermPlatformTenantList       = "platform.tenant.list"
+	PermPlatformTenantRead       = "platform.tenant.read"
+	PermPlatformTenantCreate     = "platform.tenant.create"
+	PermPlatformTenantUpdate     = "platform.tenant.update"
+	PermPlatformTenantDeactivate = "platform.tenant.deactivate"
+	PermPlatformTenantReactivate = "platform.tenant.reactivate"
+	PermPlatformUserRead         = "platform.user.read"
+	PermPlatformUserDeactivate   = "platform.user.deactivate"
+	PermPlatformUserReactivate   = "platform.user.reactivate"
+	PermPlatformRoleRead         = "platform.role.read"
+	PermPlatformRoleCreate       = "platform.role.create"
+	PermPlatformRoleUpdate       = "platform.role.update"
+	PermPlatformRoleDelete       = "platform.role.delete"
+	PermPlatformRoleAssign       = "platform.role.assign"
+	PermPlatformRoleAssignPerms  = "platform.role.assign_permissions"
+)
+
+// Canonical tenant permission identifiers.
+const (
+	PermTenantRead            = "tenant.read"
+	PermTenantUpdate          = "tenant.update"
+	PermTenantUserRead        = "tenant.user.read"
+	PermTenantUserCreate      = "tenant.user.create"
+	PermTenantUserUpdate      = "tenant.user.update"
+	PermTenantUserAssignRole  = "tenant.user.assign_role"
+	PermTenantUserRemove      = "tenant.user.remove"
+	PermTenantRoleRead        = "tenant.role.read"
+	PermTenantRoleCreate      = "tenant.role.create"
+	PermTenantRoleUpdate      = "tenant.role.update"
+	PermTenantRoleDelete      = "tenant.role.delete"
+	PermTenantRoleAssignPerms = "tenant.role.assign_permissions"
+	PermTenantPermissionRead  = "permission.read"
+
+	// Agent & Workflow permissions (tenant-scoped)
+	PermAgentRead       = "agent.read"
+	PermAgentCreate     = "agent.create"
+	PermAgentUpdate     = "agent.update"
+	PermAgentDelete     = "agent.delete"
+	PermWorkflowRead    = "workflow.read"
+	PermWorkflowCreate  = "workflow.create"
+	PermWorkflowUpdate  = "workflow.update"
+	PermWorkflowDelete  = "workflow.delete"
+	PermWorkflowExecute = "workflow.execute"
+)
+
+// CanonicalCatalog contains all canonical permissions mapped to their authoritative scope.
+var CanonicalCatalog = map[string]Scope{
+	PermPlatformTenantList:       ScopePlatform,
+	PermPlatformTenantRead:       ScopePlatform,
+	PermPlatformTenantCreate:     ScopePlatform,
+	PermPlatformTenantUpdate:     ScopePlatform,
+	PermPlatformTenantDeactivate: ScopePlatform,
+	PermPlatformTenantReactivate: ScopePlatform,
+	PermPlatformUserRead:         ScopePlatform,
+	PermPlatformUserDeactivate:   ScopePlatform,
+	PermPlatformUserReactivate:   ScopePlatform,
+	PermPlatformRoleRead:         ScopePlatform,
+	PermPlatformRoleCreate:       ScopePlatform,
+	PermPlatformRoleUpdate:       ScopePlatform,
+	PermPlatformRoleDelete:       ScopePlatform,
+	PermPlatformRoleAssign:       ScopePlatform,
+	PermPlatformRoleAssignPerms:  ScopePlatform,
+
+	PermTenantRead:            ScopeTenant,
+	PermTenantUpdate:          ScopeTenant,
+	PermTenantUserRead:        ScopeTenant,
+	PermTenantUserCreate:      ScopeTenant,
+	PermTenantUserUpdate:      ScopeTenant,
+	PermTenantUserAssignRole:  ScopeTenant,
+	PermTenantUserRemove:      ScopeTenant,
+	PermTenantRoleRead:        ScopeTenant,
+	PermTenantRoleCreate:      ScopeTenant,
+	PermTenantRoleUpdate:      ScopeTenant,
+	PermTenantRoleDelete:      ScopeTenant,
+	PermTenantRoleAssignPerms: ScopeTenant,
+	PermTenantPermissionRead:  ScopeTenant,
+
+	PermAgentRead:       ScopeTenant,
+	PermAgentCreate:     ScopeTenant,
+	PermAgentUpdate:     ScopeTenant,
+	PermAgentDelete:     ScopeTenant,
+	PermWorkflowRead:    ScopeTenant,
+	PermWorkflowCreate:  ScopeTenant,
+	PermWorkflowUpdate:  ScopeTenant,
+	PermWorkflowDelete:  ScopeTenant,
+	PermWorkflowExecute: ScopeTenant,
+}
+
+// ScopeOf returns the canonical scope of a permission name, or empty string if unknown.
+func ScopeOf(permissionName string) (Scope, bool) {
+	scope, ok := CanonicalCatalog[permissionName]
+	return scope, ok
+}
+
+// Permission defines a specific action and its invariant scope.
+type Permission struct {
+	Name        string `json:"name"`
+	Scope       Scope  `json:"scope"`
+	Description string `json:"description,omitempty"`
+}
+
+// DecisionReason describes the rationale behind an authorization decision.
+type DecisionReason string
+
+const (
+	ReasonAllowed                 DecisionReason = "allowed"
+	ReasonUnauthenticated         DecisionReason = "unauthenticated"
+	ReasonUserInactive            DecisionReason = "user_inactive"
+	ReasonTenantInactive          DecisionReason = "tenant_inactive"
+	ReasonUnknownPermission       DecisionReason = "unknown_permission"
+	ReasonMissingTenantScope      DecisionReason = "missing_tenant_scope"
+	ReasonNoPlatformRole          DecisionReason = "no_platform_role"
+	ReasonNoTenantRole            DecisionReason = "no_tenant_role"
+	ReasonRoleScopeMismatch       DecisionReason = "role_scope_mismatch"
+	ReasonCustomRoleWrongTenant   DecisionReason = "custom_role_wrong_tenant"
+	ReasonMissingPermission       DecisionReason = "missing_permission"
+	ReasonPolicyUnavailable       DecisionReason = "policy_unavailable"
+	ReasonPolicyStale             DecisionReason = "policy_stale"
+	ReasonResourceOwnershipDenied DecisionReason = "resource_ownership_denied"
+)
+
+// AuthorizationRequest encapsulates all input parameters for an authorization decision.
+type AuthorizationRequest struct {
+	Principal    *identity.Principal `json:"principal"`
+	Permission   string              `json:"permission"`
+	TenantID     string              `json:"tenant_id,omitempty"`
+	ResourceType string              `json:"resource_type,omitempty"`
+	ResourceID   string              `json:"resource_id,omitempty"`
+}
+
+// Decision represents the outcome of an authorization evaluation.
+type Decision struct {
+	Allowed       bool           `json:"allowed"`
+	Reason        DecisionReason `json:"reason"`
+	PolicyVersion int64          `json:"policy_version"`
+	EvaluatedAt   time.Time      `json:"evaluated_at"`
+}
+
+// Engine evaluates authorization requests against the local authorization snapshot.
+type Engine interface {
+	Authorize(ctx context.Context, req AuthorizationRequest) (Decision, error)
+	SnapshotVersion() int64
+	SnapshotAge() time.Duration
+	IsReady() bool
+}
 
 // EngineConfig configures the LocalEngine.
 type EngineConfig struct {
-	// MaxPolicyAge defines the maximum acceptable age of a policy snapshot.
-	// If the snapshot is older than MaxPolicyAge, the engine fails closed with ErrPolicyStale.
+	// MaxPolicyAge defines the maximum acceptable staleness of a policy snapshot.
+	// If the snapshot has not been confirmed or refreshed within MaxPolicyAge,
+	// the engine fails closed with ErrPolicyStale.
 	// Set to 0 to disable age expiration.
 	MaxPolicyAge time.Duration
 }
@@ -51,8 +217,15 @@ func (e *LocalEngine) IsReady() bool {
 	if !e.holder.IsReady() {
 		return false
 	}
-	if e.cfg.MaxPolicyAge > 0 && e.holder.Age() > e.cfg.MaxPolicyAge {
-		return false
+	if e.cfg.MaxPolicyAge > 0 {
+		lastConfirmed := e.holder.LastSuccessfulRefresh()
+		if lastConfirmed.IsZero() {
+			if e.holder.Age() > e.cfg.MaxPolicyAge {
+				return false
+			}
+		} else if time.Since(lastConfirmed) > e.cfg.MaxPolicyAge {
+			return false
+		}
 	}
 	return true
 }
@@ -71,13 +244,19 @@ func (e *LocalEngine) Authorize(ctx context.Context, req AuthorizationRequest) (
 		}, ErrPolicyUnavailable
 	}
 
-	if e.cfg.MaxPolicyAge > 0 && now.Sub(snapshot.CreatedAt) > e.cfg.MaxPolicyAge {
-		return Decision{
-			Allowed:       false,
-			Reason:        ReasonPolicyStale,
-			PolicyVersion: snapshot.Version,
-			EvaluatedAt:   now,
-		}, ErrPolicyStale
+	if e.cfg.MaxPolicyAge > 0 {
+		lastConfirmed := e.holder.LastSuccessfulRefresh()
+		if lastConfirmed.IsZero() {
+			lastConfirmed = snapshot.CreatedAt
+		}
+		if now.Sub(lastConfirmed) > e.cfg.MaxPolicyAge {
+			return Decision{
+				Allowed:       false,
+				Reason:        ReasonPolicyStale,
+				PolicyVersion: snapshot.Version,
+				EvaluatedAt:   now,
+			}, ErrPolicyStale
+		}
 	}
 
 	// 2. Principal check
@@ -164,7 +343,6 @@ func (e *LocalEngine) authorizePlatform(
 	permission string,
 	now time.Time,
 ) (Decision, error) {
-	// Platform role lookup
 	roleID, hasRole := snapshot.PlatformAssignments[userIDStr]
 	if !hasRole || roleID == "" {
 		return Decision{
@@ -319,4 +497,9 @@ func (e *LocalEngine) authorizeTenant(
 		PolicyVersion: snapshot.Version,
 		EvaluatedAt:   now,
 	}, nil
+}
+
+// ParsedTenantUUID converts a string tenantID to uuid.UUID if valid.
+func ParsedTenantUUID(tenantID string) (uuid.UUID, error) {
+	return uuid.Parse(tenantID)
 }

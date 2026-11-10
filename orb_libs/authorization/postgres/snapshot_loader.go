@@ -1,4 +1,4 @@
-package repository
+package postgres
 
 import (
 	"context"
@@ -8,42 +8,42 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/nooman57554/The_Orb/orb_libs/authorization"
-	"github.com/nooman57554/The_Orb/orb_libs/dbconnector"
 )
 
-// SnapshotLoader loads a complete, consistent PolicySnapshot from the IAM database.
+// DB defines the minimal PostgreSQL interface required to load authorization snapshots.
+type DB interface {
+	BeginTx(ctx context.Context, txOptions pgx.TxOptions) (pgx.Tx, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// SnapshotLoader loads consistent PolicySnapshots from a PostgreSQL database.
 // It implements authorization.SnapshotSource.
-type SnapshotLoader interface {
-	authorization.SnapshotSource
+type SnapshotLoader struct {
+	db DB
 }
 
-// PostgresSnapshotLoader implements SnapshotLoader using the PostgreSQL connection pool.
-type PostgresSnapshotLoader struct {
-	db *dbconnector.DBConnector
+var _ authorization.SnapshotSource = (*SnapshotLoader)(nil)
+
+// NewSnapshotLoader creates a new PostgreSQL SnapshotLoader.
+func NewSnapshotLoader(db DB) *SnapshotLoader {
+	return &SnapshotLoader{db: db}
 }
 
-var _ SnapshotLoader = (*PostgresSnapshotLoader)(nil)
-
-func NewPostgresSnapshotLoader(db *dbconnector.DBConnector) *PostgresSnapshotLoader {
-	return &PostgresSnapshotLoader{db: db}
-}
-
-// GetLatestVersion returns the current policy version from the outbox sequence table.
-func (l *PostgresSnapshotLoader) GetLatestVersion(ctx context.Context) (int64, error) {
+// GetLatestVersion queries the current policy version from the outbox sequence table.
+// If the query fails, it propagates the error and does not substitute a default version.
+func (l *SnapshotLoader) GetLatestVersion(ctx context.Context) (int64, error) {
 	var version int64
-	err := l.db.Pool().QueryRow(ctx, "SELECT COALESCE(MAX(version), 1) FROM authz_outbox").Scan(&version)
+	err := l.db.QueryRow(ctx, "SELECT COALESCE(MAX(version), 1) FROM authz_outbox").Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("query latest policy version: %w", err)
-	}
-	if version <= 0 {
-		return 1, nil
 	}
 	return version, nil
 }
 
-// LoadSnapshot loads a complete, transactionally consistent snapshot using a REPEATABLE READ transaction.
-func (l *PostgresSnapshotLoader) LoadSnapshot(ctx context.Context) (*authorization.PolicySnapshot, error) {
-	tx, err := l.db.Pool().BeginTx(ctx, pgx.TxOptions{
+// LoadSnapshot loads a complete, transactionally consistent snapshot using a REPEATABLE READ read-only transaction.
+// All policy tables and the policy version are read from a single MVCC snapshot.
+func (l *SnapshotLoader) LoadSnapshot(ctx context.Context) (*authorization.PolicySnapshot, error) {
+	tx, err := l.db.BeginTx(ctx, pgx.TxOptions{
 		IsoLevel:   pgx.RepeatableRead,
 		AccessMode: pgx.ReadOnly,
 	})
@@ -57,9 +57,6 @@ func (l *PostgresSnapshotLoader) LoadSnapshot(ctx context.Context) (*authorizati
 	err = tx.QueryRow(ctx, "SELECT COALESCE(MAX(version), 1) FROM authz_outbox").Scan(&version)
 	if err != nil {
 		return nil, fmt.Errorf("query policy version: %w", err)
-	}
-	if version <= 0 {
-		version = 1
 	}
 
 	snapshot := &authorization.PolicySnapshot{

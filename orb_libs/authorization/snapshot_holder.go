@@ -9,6 +9,7 @@ import (
 
 var (
 	ErrOlderSnapshotVersion = errors.New("cannot apply older or equal snapshot version")
+	ErrInvalidSnapshot      = errors.New("invalid authorization snapshot")
 )
 
 // RoleScope defines the scope category of a role in the IAM model.
@@ -168,7 +169,10 @@ func (h *SnapshotHolder) Set(newSnapshot *PolicySnapshot) error {
 	}
 
 	h.snapshot = newSnapshot
-	h.lastSuccessfulRefresh = time.Now()
+	// Initialize confirmation timestamp with snapshot creation time if newer, or current time
+	if newSnapshot.CreatedAt.After(h.lastSuccessfulRefresh) {
+		h.lastSuccessfulRefresh = newSnapshot.CreatedAt
+	}
 	h.lastRefreshError = nil
 	return nil
 }
@@ -203,7 +207,7 @@ func (h *SnapshotHolder) IsReady() bool {
 	return h.snapshot != nil
 }
 
-// RecordRefreshSuccess records that a refresh succeeded.
+// RecordRefreshSuccess records that a refresh or version confirmation succeeded.
 func (h *SnapshotHolder) RecordRefreshSuccess(t time.Time) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -213,7 +217,7 @@ func (h *SnapshotHolder) RecordRefreshSuccess(t time.Time) {
 	h.lastRefreshError = nil
 }
 
-// RecordRefreshFailure records that a refresh failed.
+// RecordRefreshFailure records that a refresh or version check failed.
 func (h *SnapshotHolder) RecordRefreshFailure(err error, t time.Time) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -222,7 +226,7 @@ func (h *SnapshotHolder) RecordRefreshFailure(err error, t time.Time) {
 	h.lastRefreshAttempt = t
 }
 
-// LastSuccessfulRefresh returns the timestamp of the last successful policy refresh.
+// LastSuccessfulRefresh returns the timestamp of the last successful policy refresh or version confirmation.
 func (h *SnapshotHolder) LastSuccessfulRefresh() time.Time {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -257,7 +261,11 @@ func (h *SnapshotHolder) Status(maxPolicyAge ...time.Duration) SnapshotStatus {
 		status.CreatedAt = h.snapshot.CreatedAt
 		status.Age = time.Since(h.snapshot.CreatedAt)
 		if len(maxPolicyAge) > 0 && maxPolicyAge[0] > 0 {
-			status.IsStale = status.Age > maxPolicyAge[0]
+			lastConfirmed := h.lastSuccessfulRefresh
+			if lastConfirmed.IsZero() {
+				lastConfirmed = h.snapshot.CreatedAt
+			}
+			status.IsStale = time.Since(lastConfirmed) > maxPolicyAge[0]
 		}
 	}
 

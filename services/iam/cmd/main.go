@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/nooman57554/The_Orb/orb_libs/authorization"
+	"github.com/nooman57554/The_Orb/orb_libs/authorization/postgres"
 	"github.com/nooman57554/The_Orb/orb_libs/dbconnector"
 	"github.com/nooman57554/The_Orb/orb_libs/identity/httpauth"
 	"github.com/nooman57554/The_Orb/orb_libs/identity/jwtverify"
@@ -31,12 +32,33 @@ func main() {
 		log.Fatalf("load IAM configuration: %v", err)
 	}
 
-	// create DB connection pool
+	// 1. Initialize database connection pool
 	db, err := dbconnector.New(ctx, cfg.DatabaseConfig())
 	if err != nil {
 		log.Fatalf("create database connector: %v", err)
 	}
 	defer db.Close()
+
+	// 2. Construct PostgreSQL snapshot source from database pool
+	snapshotSource := postgres.NewSnapshotLoader(db.Pool())
+
+	// 3. Construct shared authorization runtime
+	authzRuntime, err := authorization.NewRuntime(snapshotSource)
+	if err != nil {
+		log.Fatalf("initialize authorization runtime: %v", err)
+	}
+
+	// 4. Bootstrap and start runtime
+	if err := authzRuntime.Bootstrap(ctx); err != nil {
+		log.Printf("warning: policy snapshot bootstrap failed (fail-closed until snapshot loaded): %v", err)
+	}
+	if err := authzRuntime.Start(ctx); err != nil {
+		log.Fatalf("start authorization runtime: %v", err)
+	}
+	defer authzRuntime.Stop()
+
+	// 5. Obtain shared engine
+	authzEngine := authzRuntime.Engine()
 
 	// initialize JWT manager and verifier
 	jwtManager, tokenVerifier, err := initAuth(cfg)
@@ -53,20 +75,6 @@ func main() {
 	roleRepo := repository.NewPostgresRoleRepository(db, outboxRepo)
 	permRepo := repository.NewPostgresPermissionRepository(db)
 	roleAssignRepo := repository.NewPostgresRoleAssignmentRepository(db, outboxRepo)
-	snapshotLoader := repository.NewPostgresSnapshotLoader(db)
-
-	// initialize policy distribution service and bootstrap initial snapshot
-	policyDistService, err := service.NewPolicyDistributionService(snapshotLoader)
-	if err != nil {
-		log.Fatalf("initialize policy distribution service: %v", err)
-	}
-	if err := policyDistService.Bootstrap(ctx); err != nil {
-		log.Printf("warning: policy snapshot bootstrap failed (fail-closed until snapshot loaded): %v", err)
-	}
-	if err := policyDistService.Start(ctx); err != nil {
-		log.Fatalf("start policy distribution service: %v", err)
-	}
-	defer policyDistService.Stop()
 
 	// create core domain services
 	roleAssignService, err := service.NewRoleAssignmentService(
@@ -118,16 +126,16 @@ func main() {
 		log.Fatalf("initialize auth service: %v", err)
 	}
 
-	// initialize unified route authorizer middleware
-	authorizer, err := authorization.NewAuthorizer(policyDistService.Engine())
+	// 6. Construct shared HTTP authorizer
+	authorizer, err := authorization.NewAuthorizer(authzEngine)
 	if err != nil {
 		log.Fatalf("initialize authorizer middleware: %v", err)
 	}
 
 	// create handlers
 	authHandler := handler.NewAuthHandler(authService)
-	authzHandler := handler.NewAuthorizationHandler(policyDistService.Engine())
-	permHandler := handler.NewPermissionHandler(roleService, policyDistService.Engine())
+	authzHandler := handler.NewAuthorizationHandler(authzEngine)
+	permHandler := handler.NewPermissionHandler(roleService, authzEngine)
 	roleHandler := handler.NewRoleHandler(roleService, roleAssignService)
 	tenantHandler := handler.NewTenantHandler(tenantService)
 	tenantUserHandler := handler.NewTenantUserHandler(tenantUserService, roleAssignService)
@@ -160,6 +168,7 @@ func main() {
 	// Permission Catalog routes
 	mux.HandleFunc("GET /v1/permissions", permHandler.ListPermissions)
 
+	// 7. Register routes using shared Require middleware
 	// Platform Role routes
 	mux.HandleFunc("GET /v1/platform-roles", authorizer.Require(authorization.PermPlatformRoleRead)(roleHandler.ListPlatformRoles))
 	mux.HandleFunc("PUT /v1/users/{id}/platform-role", authorizer.Require(authorization.PermPlatformRoleAssign)(roleHandler.AssignPlatformRole))
@@ -206,15 +215,22 @@ func main() {
 
 	log.Printf("IAM server starting on %s", cfg.HTTPAddr)
 
+	serverErr := make(chan error, 1)
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("IAM server failed: %v", err)
+			serverErr <- err
 		}
 	}()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+
+	select {
+	case err := <-serverErr:
+		log.Printf("IAM HTTP server error: %v", err)
+	case sig := <-quit:
+		log.Printf("Received signal %v, shutting down IAM server...", sig)
+	}
 
 	log.Println("Shutting down IAM server...")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
