@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/nooman57554/The_Orb/orb_libs/authorization"
 	"github.com/nooman57554/The_Orb/orb_libs/identity"
 	"github.com/nooman57554/The_Orb/services/iam/handler"
 	"github.com/nooman57554/The_Orb/services/iam/model"
@@ -26,8 +27,7 @@ func (m *mockRoleRepoForHandler) GetByID(ctx context.Context, id uuid.UUID) (*mo
 	if !ok {
 		return nil, repository.ErrNotFound
 	}
-	copy := *r
-	return &copy, nil
+	return r, nil
 }
 func (m *mockRoleRepoForHandler) GetByNameAndScope(ctx context.Context, name, scope string, tenantID *uuid.UUID) (*model.Role, error) {
 	return nil, nil
@@ -42,9 +42,7 @@ func (m *mockRoleRepoForHandler) ListByTenant(ctx context.Context, tenantID uuid
 func (m *mockRoleRepoForHandler) ListPlatform(ctx context.Context) ([]model.Role, error) {
 	var list []model.Role
 	for _, r := range m.roles {
-		if r.Scope == model.RoleScopePlatform {
-			list = append(list, *r)
-		}
+		list = append(list, *r)
 	}
 	return list, nil
 }
@@ -56,25 +54,10 @@ func (m *mockRoleRepoForHandler) CreateCustom(ctx context.Context, role *model.R
 	return nil
 }
 func (m *mockRoleRepoForHandler) UpdateCustom(ctx context.Context, role *model.Role, permissionIDs []uuid.UUID) error {
-	existing, ok := m.roles[role.ID]
-	if !ok {
-		return repository.ErrNotFound
-	}
-	if existing.Scope != model.RoleScopeCustomTenant {
-		return repository.ErrSystemRoleImmutable
-	}
-	existing.Name = role.Name
-	existing.Description = role.Description
+	m.roles[role.ID] = role
 	return nil
 }
 func (m *mockRoleRepoForHandler) DeleteCustom(ctx context.Context, id, tenantID uuid.UUID) error {
-	existing, ok := m.roles[id]
-	if !ok {
-		return repository.ErrNotFound
-	}
-	if existing.Scope != model.RoleScopeCustomTenant {
-		return repository.ErrSystemRoleImmutable
-	}
 	if m.activeAssignments[id] {
 		return repository.ErrRoleHasAssignments
 	}
@@ -93,8 +76,10 @@ func (m *mockRoleRepoForHandler) GetRolePermissions(ctx context.Context, roleID 
 }
 
 type mockRoleAssignRepoForHandler struct {
-	members       map[uuid.UUID][]model.TenantMemberRecord
-	platformRoles map[uuid.UUID]*model.Role
+	members            map[uuid.UUID][]model.TenantMemberRecord
+	platformRoles      map[uuid.UUID]*model.Role
+	tenantRoles        map[uuid.UUID]map[uuid.UUID]*model.Role
+	activeTenantAdmins map[uuid.UUID]int
 }
 
 func (m *mockRoleAssignRepoForHandler) AssignTenantRole(ctx context.Context, userID, tenantID, roleID uuid.UUID) error {
@@ -102,6 +87,23 @@ func (m *mockRoleAssignRepoForHandler) AssignTenantRole(ctx context.Context, use
 }
 func (m *mockRoleAssignRepoForHandler) RemoveTenantRole(ctx context.Context, userID, tenantID uuid.UUID) error {
 	return nil
+}
+func (m *mockRoleAssignRepoForHandler) GetTenantRole(ctx context.Context, userID, tenantID uuid.UUID) (*model.Role, error) {
+	if m.tenantRoles != nil && m.tenantRoles[userID] != nil && m.tenantRoles[userID][tenantID] != nil {
+		return m.tenantRoles[userID][tenantID], nil
+	}
+	return nil, repository.ErrNotFound
+}
+func (m *mockRoleAssignRepoForHandler) UserBelongsToTenant(ctx context.Context, userID, tenantID uuid.UUID) (bool, error) {
+	return true, nil
+}
+func (m *mockRoleAssignRepoForHandler) CountActiveTenantAdmins(ctx context.Context, tenantID uuid.UUID) (int, error) {
+	if m.activeTenantAdmins != nil {
+		if count, ok := m.activeTenantAdmins[tenantID]; ok {
+			return count, nil
+		}
+	}
+	return 1, nil
 }
 func (m *mockRoleAssignRepoForHandler) ListUsersByTenantRole(ctx context.Context, tenantID, roleID uuid.UUID) ([]model.TenantMemberRecord, error) {
 	return m.members[roleID], nil
@@ -133,18 +135,19 @@ func (m *mockRoleAssignRepoForHandler) CountPlatformAdmins(ctx context.Context) 
 
 func TestRoleHandler_CreateCustomTenantRole(t *testing.T) {
 	authzRepo := newMockAuthzRepository()
-	authzService, _ := service.NewAuthorizationService(authzRepo)
 	roleRepo := &mockRoleRepoForHandler{roles: make(map[uuid.UUID]*model.Role)}
 	permRepo := &mockPermRepoForHandler{}
 	roleAssignRepo := &mockRoleAssignRepoForHandler{members: make(map[uuid.UUID][]model.TenantMemberRecord)}
 	userRepo := newMockUserRepository()
-	roleService, _ := service.NewRoleService(roleRepo, permRepo, roleAssignRepo, authzService, userRepo)
+	tenantRepo := newMockTenantRepository()
 
-	h := handler.NewRoleHandler(roleService, authzService, roleAssignRepo)
+	roleAssignSvc, _ := service.NewRoleAssignmentService(roleAssignRepo, roleRepo, userRepo, tenantRepo, authzRepo)
+	roleService, _ := service.NewRoleService(roleRepo, permRepo, roleAssignSvc)
+	h := handler.NewRoleHandler(roleService, roleAssignSvc)
 
 	userID := uuid.New()
 	tenantID := uuid.New()
-	authzRepo.grantTenant(userID, tenantID, "role.create")
+	authzRepo.grantTenant(userID, tenantID, authorization.PermTenantRoleCreate)
 
 	body, _ := json.Marshal(map[string]any{
 		"name":        "SecurityAuditor",
@@ -165,7 +168,6 @@ func TestRoleHandler_CreateCustomTenantRole(t *testing.T) {
 
 func TestRoleHandler_DeleteCustomTenantRole_ConflictWhenAssigned(t *testing.T) {
 	authzRepo := newMockAuthzRepository()
-	authzService, _ := service.NewAuthorizationService(authzRepo)
 	roleID := uuid.New()
 	tenantID := uuid.New()
 	roleRepo := &mockRoleRepoForHandler{
@@ -184,12 +186,14 @@ func TestRoleHandler_DeleteCustomTenantRole_ConflictWhenAssigned(t *testing.T) {
 	permRepo := &mockPermRepoForHandler{}
 	roleAssignRepo := &mockRoleAssignRepoForHandler{members: make(map[uuid.UUID][]model.TenantMemberRecord)}
 	userRepo := newMockUserRepository()
-	roleService, _ := service.NewRoleService(roleRepo, permRepo, roleAssignRepo, authzService, userRepo)
+	tenantRepo := newMockTenantRepository()
 
-	h := handler.NewRoleHandler(roleService, authzService, roleAssignRepo)
+	roleAssignSvc, _ := service.NewRoleAssignmentService(roleAssignRepo, roleRepo, userRepo, tenantRepo, authzRepo)
+	roleService, _ := service.NewRoleService(roleRepo, permRepo, roleAssignSvc)
+	h := handler.NewRoleHandler(roleService, roleAssignSvc)
 
 	userID := uuid.New()
-	authzRepo.grantTenant(userID, tenantID, "role.delete")
+	authzRepo.grantTenant(userID, tenantID, authorization.PermTenantRoleDelete)
 
 	req := httptest.NewRequest(http.MethodDelete, "/v1/tenants/"+tenantID.String()+"/roles/"+roleID.String(), nil)
 	req.SetPathValue("tenantID", tenantID.String())
@@ -206,7 +210,6 @@ func TestRoleHandler_DeleteCustomTenantRole_ConflictWhenAssigned(t *testing.T) {
 
 func TestRoleHandler_PlatformRole_SelfModificationForbidden(t *testing.T) {
 	authzRepo := newMockAuthzRepository()
-	authzService, _ := service.NewAuthorizationService(authzRepo)
 	roleID := uuid.New()
 	roleRepo := &mockRoleRepoForHandler{
 		roles: map[uuid.UUID]*model.Role{
@@ -223,13 +226,15 @@ func TestRoleHandler_PlatformRole_SelfModificationForbidden(t *testing.T) {
 		platformRoles: make(map[uuid.UUID]*model.Role),
 	}
 	userRepo := newMockUserRepository()
-	roleService, _ := service.NewRoleService(roleRepo, permRepo, roleAssignRepo, authzService, userRepo)
+	tenantRepo := newMockTenantRepository()
 
-	h := handler.NewRoleHandler(roleService, authzService, roleAssignRepo)
+	roleAssignSvc, _ := service.NewRoleAssignmentService(roleAssignRepo, roleRepo, userRepo, tenantRepo, authzRepo)
+	roleService, _ := service.NewRoleService(roleRepo, permRepo, roleAssignSvc)
+	h := handler.NewRoleHandler(roleService, roleAssignSvc)
 
 	adminID := uuid.New()
 	userRepo.Create(context.Background(), &model.User{ID: adminID, Status: "active"})
-	authzRepo.grantPlatform(adminID, "role.assign")
+	authzRepo.grantPlatform(adminID, authorization.PermPlatformRoleAssign)
 
 	body, _ := json.Marshal(map[string]any{
 		"role_id": roleID.String(),

@@ -7,7 +7,7 @@ import (
 	"github.com/nooman57554/The_Orb/services/iam/model"
 )
 
-// AuthorizationRepository defines the interface for database-backed authorization checks.
+// AuthorizationRepository defines policy query methods for IAM authorization.
 type AuthorizationRepository interface {
 	// HasPlatformPermission checks if a user has been granted a specific platform-scoped permission
 	// via role_assignments (tenant_id IS NULL), verifying that the user status is active.
@@ -23,9 +23,6 @@ type AuthorizationRepository interface {
 
 	// GetTenantRole returns the role assigned to a user in a tenant.
 	GetTenantRole(ctx context.Context, userID uuid.UUID, tenantID uuid.UUID) (*model.Role, error)
-
-	// CountActiveTenantAdmins counts the number of active users with administrative privileges in a tenant.
-	CountActiveTenantAdmins(ctx context.Context, tenantID uuid.UUID) (int, error)
 
 	// IsUserActive checks whether a user exists and is active.
 	IsUserActive(ctx context.Context, userID uuid.UUID) (bool, error)

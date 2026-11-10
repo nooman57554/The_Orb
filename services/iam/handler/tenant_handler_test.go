@@ -14,12 +14,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/nooman57554/The_Orb/orb_libs/authorization"
 	"github.com/nooman57554/The_Orb/orb_libs/httpx"
 	"github.com/nooman57554/The_Orb/orb_libs/identity"
 	"github.com/nooman57554/The_Orb/orb_libs/identity/httpauth"
 	"github.com/nooman57554/The_Orb/orb_libs/identity/jwtverify"
 	"github.com/nooman57554/The_Orb/services/iam/auth"
 	"github.com/nooman57554/The_Orb/services/iam/handler"
+	"github.com/nooman57554/The_Orb/services/iam/middleware"
 	"github.com/nooman57554/The_Orb/services/iam/model"
 	"github.com/nooman57554/The_Orb/services/iam/repository"
 	"github.com/nooman57554/The_Orb/services/iam/service"
@@ -144,7 +146,8 @@ func setupTenantFixture(t *testing.T) *tenantFixture {
 		t.Fatalf("create authorization service: %v", err)
 	}
 
-	tenantHandler := handler.NewTenantHandler(tenantRepo, authzService)
+	tenantService, _ := service.NewTenantService(tenantRepo)
+	tenantHandler := handler.NewTenantHandler(tenantService)
 
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -188,9 +191,14 @@ func setupTenantFixture(t *testing.T) *tenantFixture {
 		t.Fatalf("create bearer middleware: %v", err)
 	}
 
+	authorizer, err := middleware.NewAuthorizer(authzService.Engine())
+	if err != nil {
+		t.Fatalf("create authorizer: %v", err)
+	}
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v1/tenants/{id}", tenantHandler.GetTenant)
-	mux.HandleFunc("PATCH /v1/tenants/{id}", tenantHandler.UpdateTenant)
+	mux.HandleFunc("GET /v1/tenants/{id}", authorizer.Require(authorization.PermTenantRead, authorization.RouteParamResolver("id"))(tenantHandler.GetTenant))
+	mux.HandleFunc("PATCH /v1/tenants/{id}", authorizer.Require("tenant.update", authorization.RouteParamResolver("id"))(tenantHandler.UpdateTenant))
 
 	appHandler := bearerMiddleware.Require(mux)
 

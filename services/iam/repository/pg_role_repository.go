@@ -13,13 +13,26 @@ import (
 )
 
 type PostgresRoleRepository struct {
-	db *dbconnector.DBConnector
+	db         *dbconnector.DBConnector
+	outboxRepo OutboxRepository
 }
 
 var _ RoleRepository = (*PostgresRoleRepository)(nil)
 
-func NewPostgresRoleRepository(db *dbconnector.DBConnector) *PostgresRoleRepository {
-	return &PostgresRoleRepository{db: db}
+func NewPostgresRoleRepository(
+	db *dbconnector.DBConnector,
+	outboxRepo ...OutboxRepository,
+) *PostgresRoleRepository {
+	var ob OutboxRepository
+	if len(outboxRepo) > 0 && outboxRepo[0] != nil {
+		ob = outboxRepo[0]
+	} else {
+		ob = NewPostgresOutboxRepository(db)
+	}
+	return &PostgresRoleRepository{
+		db:         db,
+		outboxRepo: ob,
+	}
 }
 
 func (r *PostgresRoleRepository) GetByID(ctx context.Context, id uuid.UUID) (*model.Role, error) {
@@ -312,6 +325,19 @@ func (r *PostgresRoleRepository) CreateCustom(
 		}
 	}
 
+	if r.outboxRepo != nil {
+		payload := map[string]any{
+			"role_id":     role.ID.String(),
+			"name":        role.Name,
+			"scope":       role.Scope,
+			"tenant_id":   role.TenantID.String(),
+			"permissions": permissionIDs,
+		}
+		if _, err := r.outboxRepo.WriteEvent(ctx, tx, EventRoleCreated, "role", role.ID.String(), payload); err != nil {
+			return fmt.Errorf("write outbox event: %w", err)
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit tx: %w", err)
 	}
@@ -396,6 +422,18 @@ func (r *PostgresRoleRepository) UpdateCustom(
 		}
 	}
 
+	if r.outboxRepo != nil {
+		payload := map[string]any{
+			"role_id":     role.ID.String(),
+			"name":        role.Name,
+			"tenant_id":   role.TenantID.String(),
+			"permissions": permissionIDs,
+		}
+		if _, err := r.outboxRepo.WriteEvent(ctx, tx, EventRoleUpdated, "role", role.ID.String(), payload); err != nil {
+			return fmt.Errorf("write outbox event: %w", err)
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit tx: %w", err)
 	}
@@ -464,6 +502,16 @@ func (r *PostgresRoleRepository) DeleteCustom(
 	}
 	if res.RowsAffected() == 0 {
 		return fmt.Errorf("role: %w", ErrNotFound)
+	}
+
+	if r.outboxRepo != nil {
+		payload := map[string]string{
+			"role_id":   id.String(),
+			"tenant_id": tenantID.String(),
+		}
+		if _, err := r.outboxRepo.WriteEvent(ctx, tx, EventRoleDeleted, "role", id.String(), payload); err != nil {
+			return fmt.Errorf("write outbox event: %w", err)
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {

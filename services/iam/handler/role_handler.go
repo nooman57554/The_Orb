@@ -15,24 +15,17 @@ import (
 )
 
 type RoleHandler struct {
-	roleService    *service.RoleService
-	authzService   *service.AuthorizationService
-	roleAssignRepo repository.RoleAssignmentRepository
+	roleService       *service.RoleService
+	roleAssignService *service.RoleAssignmentService
 }
 
 func NewRoleHandler(
 	roleService *service.RoleService,
-	authzService *service.AuthorizationService,
-	roleAssignRepo ...repository.RoleAssignmentRepository,
+	roleAssignService *service.RoleAssignmentService,
 ) *RoleHandler {
-	var repo repository.RoleAssignmentRepository
-	if len(roleAssignRepo) > 0 {
-		repo = roleAssignRepo[0]
-	}
 	return &RoleHandler{
-		roleService:    roleService,
-		authzService:   authzService,
-		roleAssignRepo: repo,
+		roleService:       roleService,
+		roleAssignService: roleAssignService,
 	}
 }
 
@@ -65,6 +58,10 @@ type updateRoleRequest struct {
 	PermissionIDs []string `json:"permission_ids"`
 }
 
+type assignPlatformRoleRequest struct {
+	RoleID string `json:"role_id"`
+}
+
 func formatRole(r *model.Role) roleResponse {
 	var tenantID *string
 	if r.TenantID != nil && *r.TenantID != uuid.Nil {
@@ -94,25 +91,6 @@ func formatRole(r *model.Role) roleResponse {
 }
 
 func (h *RoleHandler) ListPlatformRoles(w http.ResponseWriter, r *http.Request) {
-	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok {
-		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-		return
-	}
-
-	if err := h.authzService.AuthorizePlatform(r.Context(), principal, "role.read"); err != nil {
-		if errors.Is(err, service.ErrUnauthorized) {
-			httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-			return
-		}
-		if errors.Is(err, service.ErrForbidden) {
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You are not authorized to view platform roles.")
-			return
-		}
-		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
-		return
-	}
-
 	roles, err := h.roleService.ListPlatformRoles(r.Context())
 	if err != nil {
 		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
@@ -130,28 +108,9 @@ func (h *RoleHandler) ListPlatformRoles(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *RoleHandler) ListTenantRoles(w http.ResponseWriter, r *http.Request) {
-	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok {
-		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-		return
-	}
-
 	tenantID, err := uuid.Parse(r.PathValue("tenantID"))
 	if err != nil {
 		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "Tenant ID must be a valid UUID.")
-		return
-	}
-
-	if err := h.authzService.AuthorizeTenant(r.Context(), principal, tenantID, "role.read"); err != nil {
-		if errors.Is(err, service.ErrUnauthorized) {
-			httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-			return
-		}
-		if errors.Is(err, service.ErrForbidden) {
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You are not authorized to view roles in this tenant.")
-			return
-		}
-		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
 		return
 	}
 
@@ -172,12 +131,6 @@ func (h *RoleHandler) ListTenantRoles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *RoleHandler) GetTenantRole(w http.ResponseWriter, r *http.Request) {
-	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok {
-		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-		return
-	}
-
 	tenantID, err := uuid.Parse(r.PathValue("tenantID"))
 	if err != nil {
 		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "Tenant ID must be a valid UUID.")
@@ -186,19 +139,6 @@ func (h *RoleHandler) GetTenantRole(w http.ResponseWriter, r *http.Request) {
 	roleID, err := uuid.Parse(r.PathValue("roleID"))
 	if err != nil {
 		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "Role ID must be a valid UUID.")
-		return
-	}
-
-	if err := h.authzService.AuthorizeTenant(r.Context(), principal, tenantID, "role.read"); err != nil {
-		if errors.Is(err, service.ErrUnauthorized) {
-			httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-			return
-		}
-		if errors.Is(err, service.ErrForbidden) {
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You are not authorized to view roles in this tenant.")
-			return
-		}
-		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
 		return
 	}
 
@@ -216,28 +156,9 @@ func (h *RoleHandler) GetTenantRole(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *RoleHandler) CreateCustomTenantRole(w http.ResponseWriter, r *http.Request) {
-	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok {
-		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-		return
-	}
-
 	tenantID, err := uuid.Parse(r.PathValue("tenantID"))
 	if err != nil {
 		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "Tenant ID must be a valid UUID.")
-		return
-	}
-
-	if err := h.authzService.AuthorizeTenant(r.Context(), principal, tenantID, "role.create"); err != nil {
-		if errors.Is(err, service.ErrUnauthorized) {
-			httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-			return
-		}
-		if errors.Is(err, service.ErrForbidden) {
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You are not authorized to create roles in this tenant.")
-			return
-		}
-		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
 		return
 	}
 
@@ -253,27 +174,28 @@ func (h *RoleHandler) CreateCustomTenantRole(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	permUUIDs := make([]uuid.UUID, 0, len(req.PermissionIDs))
-	for _, pid := range req.PermissionIDs {
-		u, err := uuid.Parse(strings.TrimSpace(pid))
-		if err != nil {
-			httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "permission_ids must contain valid UUIDs.")
-			return
+	var permIDs []uuid.UUID
+	if len(req.PermissionIDs) > 0 {
+		permIDs = make([]uuid.UUID, 0, len(req.PermissionIDs))
+		for _, pidStr := range req.PermissionIDs {
+			pid, err := uuid.Parse(strings.TrimSpace(pidStr))
+			if err != nil {
+				httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "permission_ids must contain valid UUIDs.")
+				return
+			}
+			permIDs = append(permIDs, pid)
 		}
-		permUUIDs = append(permUUIDs, u)
 	}
 
-	role, err := h.roleService.CreateCustomTenantRole(r.Context(), tenantID, name, req.Description, permUUIDs)
+	role, err := h.roleService.CreateCustomTenantRole(r.Context(), tenantID, name, req.Description, permIDs)
 	if err != nil {
 		switch {
-		case errors.Is(err, service.ErrInvalidRoleName):
-			httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "Role name cannot be empty.")
-		case errors.Is(err, service.ErrPrivilegeEscalation):
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "Cannot grant platform permissions to tenant custom roles.")
-		case errors.Is(err, service.ErrInvalidPermissionScope):
-			httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "One or more permissions are invalid or unknown.")
 		case errors.Is(err, repository.ErrDuplicateRoleName):
 			httpx.WriteProblem(w, http.StatusConflict, "Role Already Exists", "A role with this name already exists in this tenant.")
+		case errors.Is(err, service.ErrPrivilegeEscalation):
+			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "Platform permissions cannot be assigned to custom tenant roles.")
+		case errors.Is(err, service.ErrInvalidPermissionScope):
+			httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "One or more permissions do not exist or are invalid.")
 		default:
 			httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
 		}
@@ -284,12 +206,6 @@ func (h *RoleHandler) CreateCustomTenantRole(w http.ResponseWriter, r *http.Requ
 }
 
 func (h *RoleHandler) UpdateCustomTenantRole(w http.ResponseWriter, r *http.Request) {
-	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok {
-		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-		return
-	}
-
 	tenantID, err := uuid.Parse(r.PathValue("tenantID"))
 	if err != nil {
 		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "Tenant ID must be a valid UUID.")
@@ -298,19 +214,6 @@ func (h *RoleHandler) UpdateCustomTenantRole(w http.ResponseWriter, r *http.Requ
 	roleID, err := uuid.Parse(r.PathValue("roleID"))
 	if err != nil {
 		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "Role ID must be a valid UUID.")
-		return
-	}
-
-	if err := h.authzService.AuthorizeTenant(r.Context(), principal, tenantID, "role.update"); err != nil {
-		if errors.Is(err, service.ErrUnauthorized) {
-			httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-			return
-		}
-		if errors.Is(err, service.ErrForbidden) {
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You are not authorized to update roles in this tenant.")
-			return
-		}
-		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
 		return
 	}
 
@@ -326,32 +229,30 @@ func (h *RoleHandler) UpdateCustomTenantRole(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	var permUUIDs []uuid.UUID
+	var permIDs []uuid.UUID
 	if req.PermissionIDs != nil {
-		permUUIDs = make([]uuid.UUID, 0, len(req.PermissionIDs))
-		for _, pid := range req.PermissionIDs {
-			u, err := uuid.Parse(strings.TrimSpace(pid))
+		permIDs = make([]uuid.UUID, 0, len(req.PermissionIDs))
+		for _, pidStr := range req.PermissionIDs {
+			pid, err := uuid.Parse(strings.TrimSpace(pidStr))
 			if err != nil {
 				httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "permission_ids must contain valid UUIDs.")
 				return
 			}
-			permUUIDs = append(permUUIDs, u)
+			permIDs = append(permIDs, pid)
 		}
 	}
 
-	role, err := h.roleService.UpdateCustomTenantRole(r.Context(), tenantID, roleID, name, req.Description, permUUIDs)
+	role, err := h.roleService.UpdateCustomTenantRole(r.Context(), tenantID, roleID, name, req.Description, permIDs)
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrRoleNotFound):
-			httpx.WriteProblem(w, http.StatusNotFound, "Role Not Found", "The requested role was not found.")
-		case errors.Is(err, repository.ErrSystemRoleImmutable):
-			httpx.WriteProblem(w, http.StatusBadRequest, "Bad Request", "System roles cannot be modified or deleted.")
-		case errors.Is(err, service.ErrPrivilegeEscalation):
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "Cannot grant platform permissions to tenant custom roles.")
-		case errors.Is(err, service.ErrInvalidPermissionScope):
-			httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "One or more permissions are invalid or unknown.")
+			httpx.WriteProblem(w, http.StatusNotFound, "Role Not Found", "The requested custom role was not found.")
 		case errors.Is(err, repository.ErrDuplicateRoleName):
 			httpx.WriteProblem(w, http.StatusConflict, "Role Already Exists", "A role with this name already exists in this tenant.")
+		case errors.Is(err, service.ErrPrivilegeEscalation):
+			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "Platform permissions cannot be assigned to custom tenant roles.")
+		case errors.Is(err, service.ErrInvalidPermissionScope):
+			httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "One or more permissions do not exist or are invalid.")
 		default:
 			httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
 		}
@@ -362,12 +263,6 @@ func (h *RoleHandler) UpdateCustomTenantRole(w http.ResponseWriter, r *http.Requ
 }
 
 func (h *RoleHandler) DeleteCustomTenantRole(w http.ResponseWriter, r *http.Request) {
-	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok {
-		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-		return
-	}
-
 	tenantID, err := uuid.Parse(r.PathValue("tenantID"))
 	if err != nil {
 		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "Tenant ID must be a valid UUID.")
@@ -379,28 +274,13 @@ func (h *RoleHandler) DeleteCustomTenantRole(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if err := h.authzService.AuthorizeTenant(r.Context(), principal, tenantID, "role.delete"); err != nil {
-		if errors.Is(err, service.ErrUnauthorized) {
-			httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-			return
-		}
-		if errors.Is(err, service.ErrForbidden) {
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You are not authorized to delete roles in this tenant.")
-			return
-		}
-		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
-		return
-	}
-
 	err = h.roleService.DeleteCustomTenantRole(r.Context(), tenantID, roleID)
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrRoleNotFound):
-			httpx.WriteProblem(w, http.StatusNotFound, "Role Not Found", "The requested role was not found.")
-		case errors.Is(err, repository.ErrSystemRoleImmutable):
-			httpx.WriteProblem(w, http.StatusBadRequest, "Bad Request", "System roles cannot be modified or deleted.")
+			httpx.WriteProblem(w, http.StatusNotFound, "Role Not Found", "The requested custom role was not found.")
 		case errors.Is(err, repository.ErrRoleHasAssignments):
-			httpx.WriteProblem(w, http.StatusConflict, "Role In Use", "Cannot delete role that is currently assigned to users.")
+			httpx.WriteProblem(w, http.StatusConflict, "Role In Use", "Cannot delete a role with active user assignments.")
 		default:
 			httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
 		}
@@ -410,68 +290,9 @@ func (h *RoleHandler) DeleteCustomTenantRole(w http.ResponseWriter, r *http.Requ
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *RoleHandler) ListUsersByRole(w http.ResponseWriter, r *http.Request) {
-	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok {
-		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-		return
-	}
-
-	tenantID, err := uuid.Parse(r.PathValue("tenantID"))
-	if err != nil {
-		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "Tenant ID must be a valid UUID.")
-		return
-	}
-	roleID, err := uuid.Parse(r.PathValue("roleID"))
-	if err != nil {
-		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "Role ID must be a valid UUID.")
-		return
-	}
-
-	if err := h.authzService.AuthorizeTenant(r.Context(), principal, tenantID, "role.read"); err != nil {
-		if errors.Is(err, service.ErrUnauthorized) {
-			httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-			return
-		}
-		if errors.Is(err, service.ErrForbidden) {
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You are not authorized to view roles in this tenant.")
-			return
-		}
-		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
-		return
-	}
-
-	members, err := h.roleService.ListUsersByRole(r.Context(), tenantID, roleID)
-	if err != nil {
-		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
-		return
-	}
-
-	items := make([]tenantMemberResponse, len(members))
-	for i, m := range members {
-		items[i] = tenantMemberResponse{
-			UserID:    m.UserID.String(),
-			Email:     m.Email,
-			Status:    m.Status,
-			RoleID:    m.RoleID.String(),
-			RoleName:  m.RoleName,
-			RoleScope: m.RoleScope,
-			JoinedAt:  m.JoinedAt.Format(time.RFC3339),
-		}
-	}
-
-	writeJSON(w, http.StatusOK, struct {
-		Users []tenantMemberResponse `json:"users"`
-	}{Users: items})
-}
-
-type assignPlatformRoleRequest struct {
-	RoleID string `json:"role_id"`
-}
-
 func (h *RoleHandler) AssignPlatformRole(w http.ResponseWriter, r *http.Request) {
 	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok {
+	if !ok || principal == nil || !principal.IsValid() {
 		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
 		return
 	}
@@ -494,33 +315,35 @@ func (h *RoleHandler) AssignPlatformRole(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	err = h.roleService.AssignPlatformRole(r.Context(), principal, targetUserID, roleID)
+	err = h.roleAssignService.AssignPlatformRole(r.Context(), principal, targetUserID, roleID)
 	if err != nil {
 		switch {
-		case errors.Is(err, service.ErrUnauthorized):
-			httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-		case errors.Is(err, service.ErrForbidden):
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You are not authorized to assign platform roles.")
 		case errors.Is(err, service.ErrCannotModifyOwnPlatformRole):
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "Platform administrators cannot modify their own platform role.")
-		case errors.Is(err, repository.ErrNotFound), errors.Is(err, service.ErrRoleNotFound):
-			httpx.WriteProblem(w, http.StatusNotFound, "Not Found", "The requested user or role was not found.")
+			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You cannot modify your own platform role.")
 		case errors.Is(err, service.ErrCannotRemoveLastPlatformAdmin):
-			httpx.WriteProblem(w, http.StatusConflict, "Conflict", "Cannot remove or demote the last active platform administrator.")
+			httpx.WriteProblem(w, http.StatusConflict, "Last Platform Admin", "Cannot remove or demote the last active platform administrator.")
+		case errors.Is(err, service.ErrRoleNotFound):
+			httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Role", "The specified role does not exist.")
 		case errors.Is(err, service.ErrInvalidPlatformRole):
-			httpx.WriteProblem(w, http.StatusBadRequest, "Bad Request", "The specified role is not a platform role.")
+			httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Role", "The specified role is not a platform role.")
+		case errors.Is(err, repository.ErrNotFound):
+			httpx.WriteProblem(w, http.StatusNotFound, "User Not Found", "The target user was not found.")
+		case errors.Is(err, service.ErrInactiveUser):
+			httpx.WriteProblem(w, http.StatusBadRequest, "Inactive User", "The target user is inactive.")
+		case errors.Is(err, service.ErrForbidden):
+			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You do not have permission to assign platform roles.")
 		default:
 			httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
 		}
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *RoleHandler) RemovePlatformRole(w http.ResponseWriter, r *http.Request) {
 	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok {
+	if !ok || principal == nil || !principal.IsValid() {
 		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
 		return
 	}
@@ -531,19 +354,17 @@ func (h *RoleHandler) RemovePlatformRole(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	err = h.roleService.RemovePlatformRole(r.Context(), principal, targetUserID)
+	err = h.roleAssignService.RemovePlatformRole(r.Context(), principal, targetUserID)
 	if err != nil {
 		switch {
-		case errors.Is(err, service.ErrUnauthorized):
-			httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-		case errors.Is(err, service.ErrForbidden):
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You are not authorized to remove platform roles.")
 		case errors.Is(err, service.ErrCannotModifyOwnPlatformRole):
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "Platform administrators cannot remove their own platform role.")
-		case errors.Is(err, repository.ErrNotFound):
-			httpx.WriteProblem(w, http.StatusNotFound, "Not Found", "No platform role assignment found for this user.")
+			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You cannot remove your own platform role.")
 		case errors.Is(err, service.ErrCannotRemoveLastPlatformAdmin):
-			httpx.WriteProblem(w, http.StatusConflict, "Conflict", "Cannot remove or demote the last active platform administrator.")
+			httpx.WriteProblem(w, http.StatusConflict, "Last Platform Admin", "Cannot remove or demote the last active platform administrator.")
+		case errors.Is(err, repository.ErrNotFound):
+			httpx.WriteProblem(w, http.StatusNotFound, "Assignment Not Found", "The user does not have an active platform role assignment.")
+		case errors.Is(err, service.ErrForbidden):
+			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You do not have permission to manage platform roles.")
 		default:
 			httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
 		}
@@ -554,35 +375,16 @@ func (h *RoleHandler) RemovePlatformRole(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *RoleHandler) GetPlatformRole(w http.ResponseWriter, r *http.Request) {
-	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok {
-		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-		return
-	}
-
 	targetUserID, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "User ID must be a valid UUID.")
 		return
 	}
 
-	if err := h.authzService.AuthorizePlatform(r.Context(), principal, "role.read"); err != nil {
-		if errors.Is(err, service.ErrUnauthorized) {
-			httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-			return
-		}
-		if errors.Is(err, service.ErrForbidden) {
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You are not authorized to view platform roles.")
-			return
-		}
-		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
-		return
-	}
-
-	role, err := h.roleService.GetPlatformRole(r.Context(), targetUserID)
+	role, err := h.roleAssignService.GetPlatformRole(r.Context(), targetUserID)
 	if err != nil {
-		if errors.Is(err, service.ErrRoleNotFound) {
-			httpx.WriteProblem(w, http.StatusNotFound, "Role Not Found", "The user does not have a platform role.")
+		if errors.Is(err, service.ErrRoleNotFound) || errors.Is(err, repository.ErrNotFound) {
+			httpx.WriteProblem(w, http.StatusNotFound, "Role Not Found", "No platform role assigned to this user.")
 			return
 		}
 		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
@@ -590,4 +392,32 @@ func (h *RoleHandler) GetPlatformRole(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, formatRole(role))
+}
+
+func (h *RoleHandler) ListUsersByRole(w http.ResponseWriter, r *http.Request) {
+	tenantID, err := uuid.Parse(r.PathValue("tenantID"))
+	if err != nil {
+		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "Tenant ID must be a valid UUID.")
+		return
+	}
+	roleID, err := uuid.Parse(r.PathValue("roleID"))
+	if err != nil {
+		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "Role ID must be a valid UUID.")
+		return
+	}
+
+	records, err := h.roleAssignService.ListUsersByRole(r.Context(), tenantID, roleID)
+	if err != nil {
+		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
+		return
+	}
+
+	items := make([]tenantMemberResponse, len(records))
+	for i := range records {
+		items[i] = formatMember(&records[i])
+	}
+
+	writeJSON(w, http.StatusOK, struct {
+		Users []tenantMemberResponse `json:"users"`
+	}{Users: items})
 }

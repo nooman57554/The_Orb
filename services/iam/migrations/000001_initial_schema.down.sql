@@ -1,3 +1,5 @@
+DROP TABLE IF EXISTS authz_outbox;
+DROP SEQUENCE IF EXISTS authz_version_seq;
 DROP TABLE IF EXISTS tenant_resources;
 DROP TABLE IF EXISTS api_credentials;
 DROP TABLE IF EXISTS service_accounts;
@@ -12,5 +14,6 @@ DROP TABLE IF EXISTS users;
 
 DROP FUNCTION IF EXISTS check_role_assignment_invariants();
 DROP FUNCTION IF EXISTS check_role_permission_invariants();
+DROP FUNCTION IF EXISTS check_permission_scope_update_invariants();
 DROP FUNCTION IF EXISTS check_role_immutability();
 DROP FUNCTION IF EXISTS trigger_set_timestamp();

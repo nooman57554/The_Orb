@@ -155,6 +155,29 @@ CREATE TABLE permissions (
 );
 
 
+CREATE OR REPLACE FUNCTION check_permission_scope_update_invariants()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.scope != OLD.scope THEN
+        IF EXISTS (
+            SELECT 1 FROM role_permissions rp
+            JOIN roles r ON r.id = rp.role_id
+            WHERE rp.permission_id = NEW.id
+              AND ((r.scope = 'platform' AND NEW.scope != 'platform')
+                   OR (r.scope IN ('system_tenant', 'custom_tenant') AND NEW.scope != 'tenant'))
+        ) THEN
+            RAISE EXCEPTION 'Cannot change scope of permission % because existing role grants violate invariants', NEW.id;
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_check_permission_scope_update
+BEFORE UPDATE OF scope ON permissions
+FOR EACH ROW EXECUTE FUNCTION check_permission_scope_update_invariants();
+
+
 -- ============================================================
 -- ROLE → PERMISSION
 -- ============================================================
@@ -181,6 +204,10 @@ DECLARE
 BEGIN
     SELECT scope INTO v_role_scope FROM roles WHERE id = NEW.role_id;
     SELECT scope INTO v_perm_scope FROM permissions WHERE id = NEW.permission_id;
+
+    IF v_role_scope = 'platform' AND v_perm_scope != 'platform' THEN
+        RAISE EXCEPTION 'Cannot assign non-platform permission % to platform role %', NEW.permission_id, NEW.role_id;
+    END IF;
 
     IF v_role_scope IN ('system_tenant', 'custom_tenant') AND v_perm_scope != 'tenant' THEN
         RAISE EXCEPTION 'Cannot assign platform permission % to tenant role %', NEW.permission_id, NEW.role_id;
@@ -436,3 +463,24 @@ CREATE TABLE tenant_resources (
 CREATE TRIGGER set_timestamp_tenant_resources
 BEFORE UPDATE ON tenant_resources
 FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
+
+
+-- ============================================================
+-- AUTHORIZATION POLICY VERSIONING & TRANSACTIONAL OUTBOX
+-- ============================================================
+
+CREATE SEQUENCE IF NOT EXISTS authz_version_seq START WITH 1;
+
+CREATE TABLE authz_outbox (
+    id UUID PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    aggregate_type TEXT NOT NULL,
+    aggregate_id TEXT NOT NULL,
+    version BIGINT NOT NULL,
+    payload JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    processed_at TIMESTAMPTZ
+);
+
+CREATE INDEX idx_authz_outbox_unprocessed ON authz_outbox(created_at) WHERE processed_at IS NULL;
+CREATE INDEX idx_authz_outbox_version ON authz_outbox(version);

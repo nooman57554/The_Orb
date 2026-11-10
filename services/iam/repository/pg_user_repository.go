@@ -18,16 +18,25 @@ var (
 )
 
 type PostgresUserRepository struct {
-	db *dbconnector.DBConnector
+	db         *dbconnector.DBConnector
+	outboxRepo OutboxRepository
 }
 
 var _ UserRepository = (*PostgresUserRepository)(nil)
 
 func NewPostgresUserRepository(
 	db *dbconnector.DBConnector,
+	outboxRepo ...OutboxRepository,
 ) *PostgresUserRepository {
+	var ob OutboxRepository
+	if len(outboxRepo) > 0 && outboxRepo[0] != nil {
+		ob = outboxRepo[0]
+	} else {
+		ob = NewPostgresOutboxRepository(db)
+	}
 	return &PostgresUserRepository{
-		db: db,
+		db:         db,
+		outboxRepo: ob,
 	}
 }
 
@@ -241,6 +250,17 @@ func (r *PostgresUserRepository) CreateWithTenantRole(
 		return fmt.Errorf("assign tenant role: %w", err)
 	}
 
+	if r.outboxRepo != nil {
+		payload := map[string]string{
+			"user_id":   user.ID.String(),
+			"tenant_id": tenantID.String(),
+			"role_id":   roleID.String(),
+		}
+		if _, err := r.outboxRepo.WriteEvent(ctx, tx, EventTenantRoleAssigned, "tenant", tenantID.String(), payload); err != nil {
+			return fmt.Errorf("write outbox event: %w", err)
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit tx: %w", err)
 	}
@@ -373,13 +393,19 @@ func (r *PostgresUserRepository) SetStatus(
 		return fmt.Errorf("user ID is required")
 	}
 
+	tx, err := r.db.Pool().Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
 	const query = `
 		UPDATE users
 		SET status = $1
 		WHERE id = $2
 	`
 
-	res, err := r.db.Pool().Exec(ctx, query, status, id)
+	res, err := tx.Exec(ctx, query, status, id)
 	if err != nil {
 		return fmt.Errorf("set user status: %w", err)
 	}
@@ -388,5 +414,15 @@ func (r *PostgresUserRepository) SetStatus(
 		return fmt.Errorf("user: %w", ErrNotFound)
 	}
 
-	return nil
+	if r.outboxRepo != nil {
+		payload := map[string]string{
+			"user_id": id.String(),
+			"status":  status,
+		}
+		if _, err := r.outboxRepo.WriteEvent(ctx, tx, EventUserStatusChanged, "user", id.String(), payload); err != nil {
+			return fmt.Errorf("write outbox event: %w", err)
+		}
+	}
+
+	return tx.Commit(ctx)
 }

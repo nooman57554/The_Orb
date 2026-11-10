@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/nooman57554/The_Orb/orb_libs/authorization"
 	"github.com/nooman57554/The_Orb/orb_libs/identity"
 	"github.com/nooman57554/The_Orb/services/iam/handler"
 	"github.com/nooman57554/The_Orb/services/iam/model"
@@ -34,21 +36,54 @@ func (m *mockPermRepoForHandler) GetByName(ctx context.Context, name string) (*m
 	return nil, repository.ErrNotFound
 }
 
-func TestPermissionHandler_ListPermissions_Success(t *testing.T) {
-	authzRepo := newMockAuthzRepository()
-	authzService, _ := service.NewAuthorizationService(authzRepo)
+type mockRoleRepoForPermHandler struct {
+	repository.RoleRepository
+}
 
+func (m *mockRoleRepoForPermHandler) ListPlatform(ctx context.Context) ([]model.Role, error) {
+	return nil, nil
+}
+
+func TestPermissionHandler_ListPermissions_Success(t *testing.T) {
 	userID := uuid.New()
-	authzRepo.grantPlatform(userID, "permission.read")
+	roleID := uuid.New()
+
+	holder := authorization.NewSnapshotHolder()
+	engine := authorization.NewLocalEngine(holder)
+	authzService, _ := service.NewAuthorizationService(engine)
+
+	snap := &authorization.PolicySnapshot{
+		Version:   1,
+		CreatedAt: time.Now(),
+		Users: map[string]authorization.UserPolicy{
+			userID.String(): {Active: true},
+		},
+		PlatformAssignments: map[string]string{
+			userID.String(): roleID.String(),
+		},
+		TenantAssignments: map[string]map[string]string{},
+		Roles: map[string]authorization.RolePolicy{
+			roleID.String(): {
+				ID:          roleID.String(),
+				Scope:       authorization.RoleScopePlatform,
+				Permissions: []string{authorization.PermPlatformRoleRead},
+			},
+		},
+		Permissions: map[string]authorization.PermissionDefinition{
+			authorization.PermPlatformRoleRead: {Name: authorization.PermPlatformRoleRead, Scope: authorization.ScopePlatform},
+		},
+	}
+	_ = holder.Set(snap)
 
 	permRepo := &mockPermRepoForHandler{
 		perms: []model.Permission{
-			{ID: uuid.New(), Name: "user.read", Scope: "tenant", Description: "Read users"},
-			{ID: uuid.New(), Name: "tenant.create", Scope: "platform", Description: "Create tenants"},
+			{ID: uuid.New(), Name: authorization.PermTenantUserRead, Scope: "tenant", Description: "Read users"},
+			{ID: uuid.New(), Name: authorization.PermPlatformTenantCreate, Scope: "platform", Description: "Create tenants"},
 		},
 	}
 
-	h := handler.NewPermissionHandler(permRepo, authzService)
+	roleService, _ := service.NewRoleService(&mockRoleRepoForPermHandler{}, permRepo)
+	h := handler.NewPermissionHandler(roleService, authzService)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/permissions", nil)
 	principal := &identity.Principal{UserID: userID, SessionID: uuid.New(), TokenID: uuid.New()}
@@ -75,21 +110,36 @@ func TestPermissionHandler_ListPermissions_Success(t *testing.T) {
 		t.Fatalf("expected 2 permissions, got %d", len(resp.Permissions))
 	}
 	for _, p := range resp.Permissions {
-		if p.Name == "user.read" && !p.TenantEligible {
-			t.Fatalf("expected user.read to be tenant eligible")
+		if p.Name == authorization.PermTenantUserRead && !p.TenantEligible {
+			t.Fatalf("expected PermTenantUserRead to be tenant eligible")
 		}
-		if p.Name == "tenant.create" && p.TenantEligible {
-			t.Fatalf("expected tenant.create to NOT be tenant eligible")
+		if p.Name == authorization.PermPlatformTenantCreate && p.TenantEligible {
+			t.Fatalf("expected PermPlatformTenantCreate to NOT be tenant eligible")
 		}
 	}
 }
 
 func TestPermissionHandler_ListPermissions_Forbidden(t *testing.T) {
-	authzRepo := newMockAuthzRepository()
-	authzService, _ := service.NewAuthorizationService(authzRepo)
-	permRepo := &mockPermRepoForHandler{}
+	holder := authorization.NewSnapshotHolder()
+	engine := authorization.NewLocalEngine(holder)
+	authzService, _ := service.NewAuthorizationService(engine)
 
-	h := handler.NewPermissionHandler(permRepo, authzService)
+	// Empty snapshot - user has no permissions
+	_ = holder.Set(&authorization.PolicySnapshot{
+		Version:             1,
+		CreatedAt:           time.Now(),
+		Users:               map[string]authorization.UserPolicy{},
+		PlatformAssignments: map[string]string{},
+		TenantAssignments:   map[string]map[string]string{},
+		Roles:               map[string]authorization.RolePolicy{},
+		Permissions: map[string]authorization.PermissionDefinition{
+			authorization.PermPlatformRoleRead: {Name: authorization.PermPlatformRoleRead, Scope: authorization.ScopePlatform},
+		},
+	})
+
+	permRepo := &mockPermRepoForHandler{}
+	roleService, _ := service.NewRoleService(&mockRoleRepoForPermHandler{}, permRepo)
+	h := handler.NewPermissionHandler(roleService, authzService)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/permissions", nil)
 	principal := &identity.Principal{UserID: uuid.New(), SessionID: uuid.New(), TokenID: uuid.New()}

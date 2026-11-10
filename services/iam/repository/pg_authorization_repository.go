@@ -163,37 +163,6 @@ func (r *PostgresAuthorizationRepository) GetTenantRole(
 	return &role, nil
 }
 
-func (r *PostgresAuthorizationRepository) CountActiveTenantAdmins(
-	ctx context.Context,
-	tenantID uuid.UUID,
-) (int, error) {
-	if tenantID == uuid.Nil {
-		return 0, nil
-	}
-
-	const query = `
-		SELECT COUNT(DISTINCT ra.user_id)
-		FROM role_assignments ra
-		JOIN users u ON u.id = ra.user_id
-		JOIN tenants t ON t.id = ra.tenant_id
-		JOIN roles r ON r.id = ra.role_id
-		LEFT JOIN role_permissions rp ON rp.role_id = r.id
-		LEFT JOIN permissions p ON p.id = rp.permission_id AND p.scope = 'tenant'
-		WHERE ra.tenant_id = $1
-		  AND u.status = 'active'
-		  AND t.status = 'active'
-		  AND (r.name = 'TENANT_ADMIN_RW' OR p.name IN ('user.assign_role', 'role.assign'))
-	`
-
-	var count int
-	err := r.db.Pool().QueryRow(ctx, query, tenantID).Scan(&count)
-	if err != nil {
-		return 0, fmt.Errorf("count active tenant admins: %w", err)
-	}
-
-	return count, nil
-}
-
 func (r *PostgresAuthorizationRepository) IsUserActive(
 	ctx context.Context,
 	userID uuid.UUID,

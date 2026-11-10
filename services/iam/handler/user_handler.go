@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/nooman57554/The_Orb/orb_libs/authorization"
 	"github.com/nooman57554/The_Orb/orb_libs/httpx"
 	"github.com/nooman57554/The_Orb/orb_libs/identity"
 	"github.com/nooman57554/The_Orb/services/iam/repository"
@@ -16,24 +17,17 @@ import (
 )
 
 type UserHandler struct {
-	userService       *service.UserService
-	authzService      *service.AuthorizationService
-	tenantUserService *service.TenantUserService
+	userService  *service.UserService
+	authzService *service.AuthorizationService
 }
 
 func NewUserHandler(
 	userService *service.UserService,
 	authzService *service.AuthorizationService,
-	tenantUserService ...*service.TenantUserService,
 ) *UserHandler {
-	var tus *service.TenantUserService
-	if len(tenantUserService) > 0 && tenantUserService[0] != nil {
-		tus = tenantUserService[0]
-	}
 	return &UserHandler{
-		userService:       userService,
-		authzService:      authzService,
-		tenantUserService: tus,
+		userService:  userService,
+		authzService: authzService,
 	}
 }
 
@@ -153,7 +147,7 @@ func (h *UserHandler) GetUser(
 	r *http.Request,
 ) {
 	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok {
+	if !ok || principal == nil || !principal.IsValid() {
 		httpx.WriteProblem(
 			w,
 			http.StatusUnauthorized,
@@ -174,22 +168,24 @@ func (h *UserHandler) GetUser(
 		return
 	}
 
-	if err := h.authzService.AuthorizeUserRead(r.Context(), principal, userID); err != nil {
-		if errors.Is(err, service.ErrUnauthorized) {
+	// Authorize using the shared authorization engine:
+	// Self-profile access is handled via resource ownership (ResourceID == principal.UserID).
+	// Reading other profiles requires platform.user.read.
+	authReq := authorization.AuthorizationRequest{
+		Principal:    principal,
+		Permission:   authorization.PermPlatformUserRead,
+		ResourceType: "user",
+		ResourceID:   userID.String(),
+	}
+
+	decision, err := h.authzService.Authorize(r.Context(), authReq)
+	if err != nil {
+		if errors.Is(err, authorization.ErrPolicyUnavailable) || errors.Is(err, authorization.ErrPolicyStale) {
 			httpx.WriteProblem(
 				w,
-				http.StatusUnauthorized,
-				"Unauthorized",
-				"Authentication is required.",
-			)
-			return
-		}
-		if errors.Is(err, service.ErrForbidden) {
-			httpx.WriteProblem(
-				w,
-				http.StatusForbidden,
-				"Forbidden",
-				"You are not authorized to access this resource.",
+				http.StatusServiceUnavailable,
+				"Service Unavailable",
+				"Authorization policy is temporarily unavailable.",
 			)
 			return
 		}
@@ -198,6 +194,26 @@ func (h *UserHandler) GetUser(
 			http.StatusInternalServerError,
 			"Internal Server Error",
 			"An unexpected error occurred.",
+		)
+		return
+	}
+
+	if !decision.Allowed {
+		if decision.Reason == authorization.ReasonUnauthenticated {
+			httpx.WriteProblem(
+				w,
+				http.StatusUnauthorized,
+				"Unauthorized",
+				"Authentication is required.",
+			)
+			return
+		}
+
+		httpx.WriteProblem(
+			w,
+			http.StatusForbidden,
+			"Forbidden",
+			"You are not authorized to access this resource.",
 		)
 		return
 	}
@@ -237,44 +253,17 @@ func (h *UserHandler) GetUser(
 		UpdatedAt: user.UpdatedAt.Format(time.RFC3339),
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-
-	_ = json.NewEncoder(w).Encode(response)
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (h *UserHandler) DeactivateUser(w http.ResponseWriter, r *http.Request) {
-	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok {
-		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-		return
-	}
-
 	userID, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "User ID must be a valid UUID.")
 		return
 	}
 
-	if err := h.authzService.AuthorizePlatform(r.Context(), principal, "user.deactivate"); err != nil {
-		if errors.Is(err, service.ErrUnauthorized) {
-			httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-			return
-		}
-		if errors.Is(err, service.ErrForbidden) {
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You are not authorized to deactivate users.")
-			return
-		}
-		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
-		return
-	}
-
-	if h.tenantUserService == nil {
-		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "User service unconfigured.")
-		return
-	}
-
-	if err := h.tenantUserService.DeactivateUser(r.Context(), userID); err != nil {
+	if err := h.userService.SetUserStatus(r.Context(), userID, "deactivated"); err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			httpx.WriteProblem(w, http.StatusNotFound, "User Not Found", "The requested user was not found.")
 			return
@@ -287,37 +276,13 @@ func (h *UserHandler) DeactivateUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *UserHandler) ReactivateUser(w http.ResponseWriter, r *http.Request) {
-	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok {
-		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-		return
-	}
-
 	userID, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "User ID must be a valid UUID.")
 		return
 	}
 
-	if err := h.authzService.AuthorizePlatform(r.Context(), principal, "user.reactivate"); err != nil {
-		if errors.Is(err, service.ErrUnauthorized) {
-			httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-			return
-		}
-		if errors.Is(err, service.ErrForbidden) {
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You are not authorized to reactivate users.")
-			return
-		}
-		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
-		return
-	}
-
-	if h.tenantUserService == nil {
-		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "User service unconfigured.")
-		return
-	}
-
-	if err := h.tenantUserService.ReactivateUser(r.Context(), userID); err != nil {
+	if err := h.userService.SetUserStatus(r.Context(), userID, "active"); err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			httpx.WriteProblem(w, http.StatusNotFound, "User Not Found", "The requested user was not found.")
 			return

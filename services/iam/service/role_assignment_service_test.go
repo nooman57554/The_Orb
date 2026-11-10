@@ -7,160 +7,40 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/nooman57554/The_Orb/orb_libs/authorization"
 	"github.com/nooman57554/The_Orb/orb_libs/identity"
 	"github.com/nooman57554/The_Orb/services/iam/model"
 	"github.com/nooman57554/The_Orb/services/iam/repository"
 	"github.com/nooman57554/The_Orb/services/iam/service"
 )
 
-type mockRoleAssignmentRepo struct {
-	assignTenantRole      func(ctx context.Context, userID, tenantID, roleID uuid.UUID) error
-	removeTenantRole      func(ctx context.Context, userID, tenantID uuid.UUID) error
-	listUsersByTenantRole func(ctx context.Context, tenantID, roleID uuid.UUID) ([]model.TenantMemberRecord, error)
-	assignPlatformRole    func(ctx context.Context, userID, roleID uuid.UUID) error
-	removePlatformRole    func(ctx context.Context, userID uuid.UUID) error
-	getPlatformRole       func(ctx context.Context, userID uuid.UUID) (*model.Role, error)
-	countPlatformAdmins   func(ctx context.Context) (int, error)
-}
-
-func (m *mockRoleAssignmentRepo) AssignTenantRole(ctx context.Context, userID, tenantID, roleID uuid.UUID) error {
-	if m.assignTenantRole != nil {
-		return m.assignTenantRole(ctx, userID, tenantID, roleID)
-	}
-	return nil
-}
-
-func (m *mockRoleAssignmentRepo) RemoveTenantRole(ctx context.Context, userID, tenantID uuid.UUID) error {
-	if m.removeTenantRole != nil {
-		return m.removeTenantRole(ctx, userID, tenantID)
-	}
-	return nil
-}
-
-func (m *mockRoleAssignmentRepo) ListUsersByTenantRole(ctx context.Context, tenantID, roleID uuid.UUID) ([]model.TenantMemberRecord, error) {
-	if m.listUsersByTenantRole != nil {
-		return m.listUsersByTenantRole(ctx, tenantID, roleID)
-	}
-	return nil, nil
-}
-
-func (m *mockRoleAssignmentRepo) AssignPlatformRole(ctx context.Context, userID, roleID uuid.UUID) error {
-	if m.assignPlatformRole != nil {
-		return m.assignPlatformRole(ctx, userID, roleID)
-	}
-	return nil
-}
-
-func (m *mockRoleAssignmentRepo) RemovePlatformRole(ctx context.Context, userID uuid.UUID) error {
-	if m.removePlatformRole != nil {
-		return m.removePlatformRole(ctx, userID)
-	}
-	return nil
-}
-
-func (m *mockRoleAssignmentRepo) GetPlatformRole(ctx context.Context, userID uuid.UUID) (*model.Role, error) {
-	if m.getPlatformRole != nil {
-		return m.getPlatformRole(ctx, userID)
-	}
-	return nil, repository.ErrNotFound
-}
-
-func (m *mockRoleAssignmentRepo) CountPlatformAdmins(ctx context.Context) (int, error) {
-	if m.countPlatformAdmins != nil {
-		return m.countPlatformAdmins(ctx)
-	}
-	return 1, nil
-}
-
-type mockUserRepoForRoleAssign struct {
-	users map[uuid.UUID]*model.User
-}
-
-func (m *mockUserRepoForRoleAssign) Create(ctx context.Context, user *model.User) error { return nil }
-func (m *mockUserRepoForRoleAssign) CreateWithTenantRole(ctx context.Context, user *model.User, tenantID, roleID uuid.UUID) error {
-	return nil
-}
-func (m *mockUserRepoForRoleAssign) GetByID(ctx context.Context, id uuid.UUID) (*model.User, error) {
-	if m.users != nil {
-		if u, ok := m.users[id]; ok {
-			return u, nil
-		}
-	}
-	return nil, repository.ErrNotFound
-}
-func (m *mockUserRepoForRoleAssign) GetByEmail(ctx context.Context, email string) (*model.User, error) {
-	return nil, nil
-}
-func (m *mockUserRepoForRoleAssign) GetByIDInTenant(ctx context.Context, userID, tenantID uuid.UUID) (*model.TenantMemberRecord, error) {
-	return nil, nil
-}
-func (m *mockUserRepoForRoleAssign) ListByTenant(ctx context.Context, tenantID uuid.UUID, offset, limit int) ([]model.TenantMemberRecord, int, error) {
-	return nil, 0, nil
-}
-func (m *mockUserRepoForRoleAssign) Update(ctx context.Context, user *model.User) error { return nil }
-func (m *mockUserRepoForRoleAssign) SetStatus(ctx context.Context, id uuid.UUID, status string) error {
-	return nil
-}
-
-type mockTenantRepoForRoleAssign struct {
-	tenants map[uuid.UUID]*model.Tenant
-}
-
-func (m *mockTenantRepoForRoleAssign) Create(ctx context.Context, tenant *model.Tenant) error {
-	return nil
-}
-func (m *mockTenantRepoForRoleAssign) GetByID(ctx context.Context, id uuid.UUID) (*model.Tenant, error) {
-	if m.tenants != nil {
-		if t, ok := m.tenants[id]; ok {
-			return t, nil
-		}
-	}
-	return nil, repository.ErrNotFound
-}
-func (m *mockTenantRepoForRoleAssign) GetBySlug(ctx context.Context, slug string) (*model.Tenant, error) {
-	return nil, nil
-}
-func (m *mockTenantRepoForRoleAssign) List(ctx context.Context, offset, limit int) ([]model.Tenant, int, error) {
-	return nil, 0, nil
-}
-func (m *mockTenantRepoForRoleAssign) Update(ctx context.Context, tenant *model.Tenant) error {
-	return nil
-}
-func (m *mockTenantRepoForRoleAssign) SetStatus(ctx context.Context, id uuid.UUID, status string) error {
-	return nil
-}
-
 func TestNewRoleAssignmentService_ConstructorValidation(t *testing.T) {
-	roleAssignRepo := &mockRoleAssignmentRepo{}
-	roleRepo := &mockRoleRepository{}
-	userRepo := &mockUserRepoForRoleAssign{}
-	tenantRepo := &mockTenantRepoForRoleAssign{}
+	roleAssignRepo := newMockRoleAssignmentRepo()
+	roleRepo := newMockRoleRepository()
+	userRepo := newMockUserRepository()
+	tenantRepo := newMockTenantRepository()
 	authzRepo := newMockAuthorizationRepository()
-	authzSvc, _ := service.NewAuthorizationService(authzRepo)
 
 	t.Run("nil dependencies fail with error", func(t *testing.T) {
-		if _, err := service.NewRoleAssignmentService(nil, roleRepo, userRepo, tenantRepo, authzRepo, authzSvc); err == nil {
+		if _, err := service.NewRoleAssignmentService(nil, roleRepo, userRepo, tenantRepo, authzRepo); err == nil {
 			t.Fatal("expected error on nil roleAssignRepo")
 		}
-		if _, err := service.NewRoleAssignmentService(roleAssignRepo, nil, userRepo, tenantRepo, authzRepo, authzSvc); err == nil {
+		if _, err := service.NewRoleAssignmentService(roleAssignRepo, nil, userRepo, tenantRepo, authzRepo); err == nil {
 			t.Fatal("expected error on nil roleRepo")
 		}
-		if _, err := service.NewRoleAssignmentService(roleAssignRepo, roleRepo, nil, tenantRepo, authzRepo, authzSvc); err == nil {
+		if _, err := service.NewRoleAssignmentService(roleAssignRepo, roleRepo, nil, tenantRepo, authzRepo); err == nil {
 			t.Fatal("expected error on nil userRepo")
 		}
-		if _, err := service.NewRoleAssignmentService(roleAssignRepo, roleRepo, userRepo, nil, authzRepo, authzSvc); err == nil {
+		if _, err := service.NewRoleAssignmentService(roleAssignRepo, roleRepo, userRepo, nil, authzRepo); err == nil {
 			t.Fatal("expected error on nil tenantRepo")
 		}
-		if _, err := service.NewRoleAssignmentService(roleAssignRepo, roleRepo, userRepo, tenantRepo, nil, authzSvc); err == nil {
+		if _, err := service.NewRoleAssignmentService(roleAssignRepo, roleRepo, userRepo, tenantRepo, nil); err == nil {
 			t.Fatal("expected error on nil authzRepo")
-		}
-		if _, err := service.NewRoleAssignmentService(roleAssignRepo, roleRepo, userRepo, tenantRepo, authzRepo, nil); err == nil {
-			t.Fatal("expected error on nil authzService")
 		}
 	})
 
 	t.Run("all dependencies present succeeds", func(t *testing.T) {
-		svc, err := service.NewRoleAssignmentService(roleAssignRepo, roleRepo, userRepo, tenantRepo, authzRepo, authzSvc)
+		svc, err := service.NewRoleAssignmentService(roleAssignRepo, roleRepo, userRepo, tenantRepo, authzRepo)
 		if err != nil || svc == nil {
 			t.Fatalf("expected successful construction, got err: %v", err)
 		}
@@ -183,18 +63,17 @@ func TestRoleAssignmentService_PlatformScope(t *testing.T) {
 	setupFixtures := func() (
 		*mockRoleAssignmentRepo,
 		*mockRoleRepository,
-		*mockUserRepoForRoleAssign,
-		*mockTenantRepoForRoleAssign,
+		*mockUserRepository,
+		*mockTenantRepository,
 		*mockAuthorizationRepository,
 		*service.RoleAssignmentService,
 	) {
-		assignRepo := &mockRoleAssignmentRepo{}
-		roleRepo := &mockRoleRepository{}
-		userRepo := &mockUserRepoForRoleAssign{users: make(map[uuid.UUID]*model.User)}
-		tenantRepo := &mockTenantRepoForRoleAssign{tenants: make(map[uuid.UUID]*model.Tenant)}
+		assignRepo := newMockRoleAssignmentRepo()
+		roleRepo := newMockRoleRepository()
+		userRepo := newMockUserRepository()
+		tenantRepo := newMockTenantRepository()
 		authzRepo := newMockAuthorizationRepository()
-		authzSvc, _ := service.NewAuthorizationService(authzRepo)
-		svc, _ := service.NewRoleAssignmentService(assignRepo, roleRepo, userRepo, tenantRepo, authzRepo, authzSvc)
+		svc, _ := service.NewRoleAssignmentService(assignRepo, roleRepo, userRepo, tenantRepo, authzRepo)
 		return assignRepo, roleRepo, userRepo, tenantRepo, authzRepo, svc
 	}
 
@@ -237,7 +116,7 @@ func TestRoleAssignmentService_PlatformScope(t *testing.T) {
 
 	t.Run("inactive target user rejected", func(t *testing.T) {
 		_, roleRepo, userRepo, _, authzRepo, svc := setupFixtures()
-		authzRepo.grantPlatform(adminActorID, "role.assign")
+		authzRepo.grantPlatform(adminActorID, authorization.PermPlatformRoleAssign)
 
 		roleRepo.roles = map[uuid.UUID]*model.Role{
 			platformRoleID: {ID: platformRoleID, Name: "VIEWER", Scope: model.RoleScopePlatform},
@@ -258,7 +137,7 @@ func TestRoleAssignmentService_PlatformScope(t *testing.T) {
 
 	t.Run("demote last active platform admin rejected", func(t *testing.T) {
 		assignRepo, roleRepo, userRepo, _, authzRepo, svc := setupFixtures()
-		authzRepo.grantPlatform(adminActorID, "role.assign")
+		authzRepo.grantPlatform(adminActorID, authorization.PermPlatformRoleAssign)
 
 		roleRepo.roles = map[uuid.UUID]*model.Role{
 			platformRoleID: {ID: platformRoleID, Name: "AUDITOR", Scope: model.RoleScopePlatform},
@@ -285,7 +164,7 @@ func TestRoleAssignmentService_PlatformScope(t *testing.T) {
 
 	t.Run("successful platform role assignment", func(t *testing.T) {
 		assignRepo, roleRepo, userRepo, _, authzRepo, svc := setupFixtures()
-		authzRepo.grantPlatform(adminActorID, "role.assign")
+		authzRepo.grantPlatform(adminActorID, authorization.PermPlatformRoleAssign)
 
 		roleRepo.roles = map[uuid.UUID]*model.Role{
 			platformRoleID: {ID: platformRoleID, Name: "PLATFORM_ADMIN", Scope: model.RoleScopePlatform},
@@ -314,214 +193,244 @@ func TestRoleAssignmentService_PlatformScope(t *testing.T) {
 	})
 }
 
-func TestRoleAssignmentService_TenantScope(t *testing.T) {
+func TestRoleAssignmentService_PlatformAdminMembership_Section19(t *testing.T) {
 	ctx := context.Background()
-	adminActorID := uuid.MustParse("018f0000-0000-7000-8000-000000000001")
-	targetUserID := uuid.MustParse("018f0000-0000-7000-8000-000000000002")
-	tenantID := uuid.MustParse("018f0000-0000-7000-8000-000000000003")
-	tenantRoleID := uuid.MustParse("018f0000-0000-7000-8000-000000000004")
-	sessionID := uuid.MustParse("018f0000-0000-7000-8000-000000000005")
+	adminA := uuid.MustParse("018f0000-0000-7000-8000-000000000001")
+	adminB := uuid.MustParse("018f0000-0000-7000-8000-000000000002")
+	ordinaryUser := uuid.MustParse("018f0000-0000-7000-8000-000000000003")
+	tenantX := uuid.MustParse("018f0000-0000-7000-8000-000000000010")
+	tenantY := uuid.MustParse("018f0000-0000-7000-8000-000000000020")
+	tenantRoleID := uuid.MustParse("018f0000-0000-7000-8000-000000000030")
 
-	actorPrincipal := &identity.Principal{
-		UserID:    adminActorID,
-		SessionID: sessionID,
+	principalAdminA := &identity.Principal{
+		UserID:    adminA,
+		SessionID: uuid.New(),
 		TokenID:   uuid.New(),
 	}
 
-	setupFixtures := func() (
+	setup := func() (
 		*mockRoleAssignmentRepo,
 		*mockRoleRepository,
-		*mockUserRepoForRoleAssign,
-		*mockTenantRepoForRoleAssign,
+		*mockUserRepository,
+		*mockTenantRepository,
 		*mockAuthorizationRepository,
 		*service.RoleAssignmentService,
 	) {
-		assignRepo := &mockRoleAssignmentRepo{}
-		roleRepo := &mockRoleRepository{}
-		userRepo := &mockUserRepoForRoleAssign{users: make(map[uuid.UUID]*model.User)}
-		tenantRepo := &mockTenantRepoForRoleAssign{tenants: make(map[uuid.UUID]*model.Tenant)}
+		assignRepo := newMockRoleAssignmentRepo()
+		roleRepo := newMockRoleRepository()
+		userRepo := newMockUserRepository()
+		tenantRepo := newMockTenantRepository()
 		authzRepo := newMockAuthorizationRepository()
-		authzSvc, _ := service.NewAuthorizationService(authzRepo)
-		svc, _ := service.NewRoleAssignmentService(assignRepo, roleRepo, userRepo, tenantRepo, authzRepo, authzSvc)
+
+		// Register platform admins and users
+		userRepo.users[adminA] = &model.User{ID: adminA, Status: "active"}
+		userRepo.users[adminB] = &model.User{ID: adminB, Status: "active"}
+		userRepo.users[ordinaryUser] = &model.User{ID: ordinaryUser, Status: "active"}
+
+		// Register tenants
+		tenantRepo.tenants[tenantX] = &model.Tenant{ID: tenantX, Status: "active"}
+		tenantRepo.tenants[tenantY] = &model.Tenant{ID: tenantY, Status: "active"}
+
+		// Register platform role for Admin A
+		platAdminRoleID := uuid.New()
+		roleRepo.roles[platAdminRoleID] = &model.Role{ID: platAdminRoleID, Name: "PLATFORM_ADMIN", Scope: model.RoleScopePlatform}
+		assignRepo.platformAssignments[adminA] = platAdminRoleID
+		assignRepo.roles[platAdminRoleID] = roleRepo.roles[platAdminRoleID]
+		authzRepo.grantPlatform(adminA, authorization.PermPlatformRoleAssign)
+
+		// Register system tenant role
+		roleRepo.roles[tenantRoleID] = &model.Role{
+			ID:    tenantRoleID,
+			Name:  "TENANT_USER",
+			Scope: model.RoleScopeSystemTenant,
+		}
+
+		svc, _ := service.NewRoleAssignmentService(assignRepo, roleRepo, userRepo, tenantRepo, authzRepo)
 		return assignRepo, roleRepo, userRepo, tenantRepo, authzRepo, svc
 	}
 
-	t.Run("inactive tenant rejected with ErrInactiveTenant", func(t *testing.T) {
-		_, _, _, tenantRepo, _, svc := setupFixtures()
-		tenantRepo.tenants = map[uuid.UUID]*model.Tenant{
-			tenantID: {ID: tenantID, Status: "deactivated"},
-		}
-
-		err := svc.AssignRole(ctx, actorPrincipal, service.AssignRoleRequest{
-			Scope:    service.AssignmentScopeTenant,
-			UserID:   targetUserID,
-			RoleID:   tenantRoleID,
-			TenantID: tenantID,
-		})
-		if !errors.Is(err, service.ErrInactiveTenant) {
-			t.Fatalf("expected ErrInactiveTenant, got: %v", err)
-		}
-	})
-
-	t.Run("custom tenant role owned by another tenant rejected with ErrRoleNotFound", func(t *testing.T) {
-		otherTenantID := uuid.New()
-		_, roleRepo, userRepo, tenantRepo, _, svc := setupFixtures()
-		tenantRepo.tenants = map[uuid.UUID]*model.Tenant{
-			tenantID: {ID: tenantID, Status: "active"},
-		}
-		userRepo.users = map[uuid.UUID]*model.User{
-			targetUserID: {ID: targetUserID, Status: "active"},
-		}
-		roleRepo.roles = map[uuid.UUID]*model.Role{
-			tenantRoleID: {
-				ID:       tenantRoleID,
-				Scope:    model.RoleScopeCustomTenant,
-				TenantID: &otherTenantID,
-			},
-		}
-
-		err := svc.AssignRole(ctx, actorPrincipal, service.AssignRoleRequest{
-			Scope:    service.AssignmentScopeTenant,
-			UserID:   targetUserID,
-			RoleID:   tenantRoleID,
-			TenantID: tenantID,
-		})
-		if !errors.Is(err, service.ErrRoleNotFound) {
-			t.Fatalf("expected ErrRoleNotFound, got: %v", err)
-		}
-	})
-
-	t.Run("delegation authority check rejects unauthorized permissions", func(t *testing.T) {
-		_, roleRepo, userRepo, tenantRepo, authzRepo, svc := setupFixtures()
-		tenantRepo.tenants = map[uuid.UUID]*model.Tenant{
-			tenantID: {ID: tenantID, Status: "active"},
-		}
-		userRepo.users = map[uuid.UUID]*model.User{
-			targetUserID: {ID: targetUserID, Status: "active"},
-		}
-		roleRepo.roles = map[uuid.UUID]*model.Role{
-			tenantRoleID: {
-				ID:    tenantRoleID,
-				Scope: model.RoleScopeSystemTenant,
-				Permissions: []model.Permission{
-					{Name: "user.read"},
-					{Name: "secret.admin"}, // actor does NOT have this
-				},
-			},
-		}
-
-		// Actor has tenant permission user.assign_role, but actor's role only has user.read
-		authzRepo.grantTenant(adminActorID, tenantID, "user.assign_role")
-		actorRoleID := uuid.New()
-		authzRepo.setTenantRole(adminActorID, tenantID, &model.Role{
-			ID:    actorRoleID,
-			Name:  "TENANT_MEMBER",
-			Scope: model.RoleScopeSystemTenant,
-			Permissions: []model.Permission{
-				{Name: "user.read"},
-				{Name: "user.assign_role"},
-			},
-		})
-
-		err := svc.AssignRole(ctx, actorPrincipal, service.AssignRoleRequest{
-			Scope:    service.AssignmentScopeTenant,
-			UserID:   targetUserID,
-			RoleID:   tenantRoleID,
-			TenantID: tenantID,
-		})
-		if !errors.Is(err, service.ErrCannotDelegateRole) {
-			t.Fatalf("expected ErrCannotDelegateRole, got: %v", err)
-		}
-	})
-
-	t.Run("successful tenant role assignment", func(t *testing.T) {
-		assignRepo, roleRepo, userRepo, tenantRepo, authzRepo, svc := setupFixtures()
-		tenantRepo.tenants = map[uuid.UUID]*model.Tenant{
-			tenantID: {ID: tenantID, Status: "active"},
-		}
-		userRepo.users = map[uuid.UUID]*model.User{
-			targetUserID: {ID: targetUserID, Status: "active"},
-		}
-		roleRepo.roles = map[uuid.UUID]*model.Role{
-			tenantRoleID: {
-				ID:    tenantRoleID,
-				Scope: model.RoleScopeSystemTenant,
-				Permissions: []model.Permission{
-					{Name: "user.read"},
-				},
-			},
-		}
-
-		authzRepo.grantTenant(adminActorID, tenantID, "user.assign_role")
-		authzRepo.setTenantRole(adminActorID, tenantID, &model.Role{
-			ID:    uuid.New(),
-			Name:  "TENANT_ADMIN_RW",
-			Scope: model.RoleScopeSystemTenant,
-			Permissions: []model.Permission{
-				{Name: "user.read"},
-				{Name: "user.assign_role"},
-			},
-		})
-
-		assigned := false
-		assignRepo.assignTenantRole = func(ctx context.Context, uID, tID, rID uuid.UUID) error {
-			assigned = true
-			return nil
-		}
-
-		err := svc.AssignRole(ctx, actorPrincipal, service.AssignRoleRequest{
-			Scope:    service.AssignmentScopeTenant,
-			UserID:   targetUserID,
-			RoleID:   tenantRoleID,
-			TenantID: tenantID,
-		})
+	// 1. Platform admin assigns themselves to Tenant X
+	t.Run("1. Platform admin assigns themselves to an existing tenant", func(t *testing.T) {
+		assignRepo, _, _, _, _, svc := setup()
+		err := svc.AssignTenantRole(ctx, principalAdminA, tenantX, adminA, tenantRoleID)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !assigned {
-			t.Fatal("expected assignTenantRole to be called")
+		if assignRepo.tenantAssignments[adminA][tenantX] != tenantRoleID {
+			t.Fatal("expected tenant assignment in tenantX for adminA")
 		}
 	})
 
-	t.Run("demote last tenant admin rejected", func(t *testing.T) {
-		_, roleRepo, userRepo, tenantRepo, authzRepo, svc := setupFixtures()
-		tenantRepo.tenants = map[uuid.UUID]*model.Tenant{
-			tenantID: {ID: tenantID, Status: "active"},
+	// 2. Platform admin assigns themselves to multiple tenants (Tenant X and Tenant Y)
+	t.Run("2. Platform admin assigns themselves to multiple tenants", func(t *testing.T) {
+		assignRepo, _, _, _, _, svc := setup()
+		if err := svc.AssignTenantRole(ctx, principalAdminA, tenantX, adminA, tenantRoleID); err != nil {
+			t.Fatalf("unexpected error assigning to tenantX: %v", err)
 		}
-		userRepo.users = map[uuid.UUID]*model.User{
-			targetUserID: {ID: targetUserID, Status: "active"},
+		if err := svc.AssignTenantRole(ctx, principalAdminA, tenantY, adminA, tenantRoleID); err != nil {
+			t.Fatalf("unexpected error assigning to tenantY: %v", err)
 		}
-		memberRoleID := uuid.New()
-		roleRepo.roles = map[uuid.UUID]*model.Role{
-			memberRoleID: {
-				ID:          memberRoleID,
-				Name:        "TENANT_MEMBER",
-				Scope:       model.RoleScopeSystemTenant,
-				Permissions: []model.Permission{{Name: "user.read"}},
+		if assignRepo.tenantAssignments[adminA][tenantX] != tenantRoleID ||
+			assignRepo.tenantAssignments[adminA][tenantY] != tenantRoleID {
+			t.Fatal("expected tenant assignments in both tenantX and tenantY")
+		}
+	})
+
+	// 3. Platform admin assigns another platform admin to Tenant X
+	t.Run("3. Platform admin assigns another platform admin to a tenant", func(t *testing.T) {
+		assignRepo, _, _, _, _, svc := setup()
+		err := svc.AssignTenantRole(ctx, principalAdminA, tenantX, adminB, tenantRoleID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if assignRepo.tenantAssignments[adminB][tenantX] != tenantRoleID {
+			t.Fatal("expected tenant assignment in tenantX for adminB")
+		}
+	})
+
+	// 4. Platform admin assigns ordinary user to Tenant X
+	t.Run("4. Platform admin assigns ordinary user to a tenant", func(t *testing.T) {
+		assignRepo, _, _, _, _, svc := setup()
+		err := svc.AssignTenantRole(ctx, principalAdminA, tenantX, ordinaryUser, tenantRoleID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if assignRepo.tenantAssignments[ordinaryUser][tenantX] != tenantRoleID {
+			t.Fatal("expected tenant assignment in tenantX for ordinaryUser")
+		}
+	})
+
+	// 5. Platform admin assigns a valid custom role belonging to the target tenant
+	t.Run("5. Platform admin assigns a valid custom role belonging to target tenant", func(t *testing.T) {
+		assignRepo, roleRepo, _, _, _, svc := setup()
+		customRoleID := uuid.New()
+		roleRepo.roles[customRoleID] = &model.Role{
+			ID:       customRoleID,
+			Name:     "CUSTOM_ANALYST",
+			Scope:    model.RoleScopeCustomTenant,
+			TenantID: &tenantX,
+		}
+
+		err := svc.AssignTenantRole(ctx, principalAdminA, tenantX, ordinaryUser, customRoleID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if assignRepo.tenantAssignments[ordinaryUser][tenantX] != customRoleID {
+			t.Fatal("expected custom role assigned in tenantX")
+		}
+	})
+
+	// 6. Platform admin cannot assign a custom role owned by another tenant
+	t.Run("6. Platform admin cannot assign a custom role owned by another tenant", func(t *testing.T) {
+		_, roleRepo, _, _, _, svc := setup()
+		customRoleY := uuid.New()
+		roleRepo.roles[customRoleY] = &model.Role{
+			ID:       customRoleY,
+			Name:     "CUSTOM_Y",
+			Scope:    model.RoleScopeCustomTenant,
+			TenantID: &tenantY, // belongs to tenant Y, not X
+		}
+
+		err := svc.AssignTenantRole(ctx, principalAdminA, tenantX, ordinaryUser, customRoleY)
+		if !errors.Is(err, service.ErrInvalidRoleForTenant) {
+			t.Fatalf("expected ErrInvalidRoleForTenant, got: %v", err)
+		}
+	})
+
+	// 7. Platform admin tenant membership operations do not modify platform-role assignments
+	t.Run("7. Platform admin tenant membership operations do not modify platform-role assignments", func(t *testing.T) {
+		assignRepo, _, _, _, _, svc := setup()
+		initialPlatRole := assignRepo.platformAssignments[adminA]
+		if initialPlatRole == uuid.Nil {
+			t.Fatal("precondition failed: adminA must have a platform role")
+		}
+
+		err := svc.AssignTenantRole(ctx, principalAdminA, tenantX, adminA, tenantRoleID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if assignRepo.platformAssignments[adminA] != initialPlatRole {
+			t.Fatal("platform role was modified by tenant assignment!")
+		}
+	})
+
+	// 8. Platform admin without tenant membership cannot exercise tenant-scoped permissions
+	t.Run("8. Platform admin without tenant membership cannot exercise tenant permissions", func(t *testing.T) {
+		holder := authorization.NewSnapshotHolder()
+		engine := authorization.NewLocalEngine(holder)
+
+		platAdminID := adminA.String()
+		platRoleID := uuid.New().String()
+
+		snap := &authorization.PolicySnapshot{
+			Version:   1,
+			CreatedAt: time.Now(),
+			Users: map[string]authorization.UserPolicy{
+				platAdminID: {Active: true},
+			},
+			PlatformAssignments: map[string]string{
+				platAdminID: platRoleID,
+			},
+			TenantAssignments: map[string]map[string]string{}, // No tenant assignment!
+			Roles: map[string]authorization.RolePolicy{
+				platRoleID: {
+					ID:          platRoleID,
+					Scope:       authorization.RoleScopePlatform,
+					Permissions: []string{authorization.PermPlatformRoleAssign},
+				},
+			},
+			Permissions: map[string]authorization.PermissionDefinition{
+				authorization.PermTenantUserRead: {Name: authorization.PermTenantUserRead, Scope: authorization.ScopeTenant},
 			},
 		}
+		_ = holder.Set(snap)
 
-		// Platform admin actor
-		authzRepo.grantPlatform(adminActorID, "role.assign")
-
-		// Target user is currently tenant admin
-		currentAdminRoleID := uuid.New()
-		authzRepo.setTenantRole(targetUserID, tenantID, &model.Role{
-			ID:          currentAdminRoleID,
-			Name:        "TENANT_ADMIN_RW",
-			Scope:       model.RoleScopeSystemTenant,
-			Permissions: []model.Permission{{Name: "user.assign_role"}},
+		dec, _ := engine.Authorize(ctx, authorization.AuthorizationRequest{
+			Principal:  principalAdminA,
+			Permission: authorization.PermTenantUserRead,
+			TenantID:   tenantX.String(),
 		})
-		authzRepo.setActiveTenantAdmins(tenantID, 1)
+		if dec.Allowed {
+			t.Fatal("platform admin without tenant membership must be denied tenant-scoped permissions")
+		}
+		if dec.Reason != authorization.ReasonNoTenantRole {
+			t.Fatalf("expected ReasonNoTenantRole, got %s", dec.Reason)
+		}
+	})
 
-		err := svc.AssignRole(ctx, actorPrincipal, service.AssignRoleRequest{
-			Scope:    service.AssignmentScopeTenant,
-			UserID:   targetUserID,
-			RoleID:   memberRoleID,
-			TenantID: tenantID,
-		})
-		if !errors.Is(err, service.ErrCannotRemoveLastAdmin) {
-			t.Fatalf("expected ErrCannotRemoveLastAdmin, got: %v", err)
+	// 9. Tenant admin cannot use platform-wide existing-user membership operation
+	t.Run("9. Tenant admin cannot use cross-tenant membership operation", func(t *testing.T) {
+		_, _, _, _, authzRepo, svc := setup()
+		tenantAdminID := uuid.New()
+		principalTenantAdmin := &identity.Principal{
+			UserID:    tenantAdminID,
+			SessionID: uuid.New(),
+			TokenID:   uuid.New(),
+		}
+		// Tenant admin only has tenant.user.assign_role in tenantX
+		authzRepo.grantTenant(tenantAdminID, tenantX, authorization.PermTenantUserAssignRole)
+
+		// Attempting to assign membership in tenantY must fail with ErrForbidden
+		err := svc.AssignTenantRole(ctx, principalTenantAdmin, tenantY, ordinaryUser, tenantRoleID)
+		if !errors.Is(err, service.ErrForbidden) {
+			t.Fatalf("expected ErrForbidden for cross-tenant assignment, got: %v", err)
+		}
+	})
+
+	// 10. Tenant admin cannot modify platform-role assignments
+	t.Run("10. Tenant admin cannot modify platform-role assignments", func(t *testing.T) {
+		_, _, _, _, authzRepo, svc := setup()
+		tenantAdminID := uuid.New()
+		principalTenantAdmin := &identity.Principal{
+			UserID:    tenantAdminID,
+			SessionID: uuid.New(),
+			TokenID:   uuid.New(),
+		}
+		authzRepo.grantTenant(tenantAdminID, tenantX, authorization.PermTenantUserAssignRole)
+
+		err := svc.AssignPlatformRole(ctx, principalTenantAdmin, ordinaryUser, uuid.New())
+		if !errors.Is(err, service.ErrForbidden) {
+			t.Fatalf("expected ErrForbidden when tenant admin modifies platform role, got: %v", err)
 		}
 	})
 }
@@ -532,13 +441,12 @@ func TestRoleAssignmentService_ReadOperations(t *testing.T) {
 	tenantID := uuid.New()
 	roleID := uuid.New()
 
-	assignRepo := &mockRoleAssignmentRepo{}
-	roleRepo := &mockRoleRepository{}
-	userRepo := &mockUserRepoForRoleAssign{users: make(map[uuid.UUID]*model.User)}
-	tenantRepo := &mockTenantRepoForRoleAssign{tenants: make(map[uuid.UUID]*model.Tenant)}
+	assignRepo := newMockRoleAssignmentRepo()
+	roleRepo := newMockRoleRepository()
+	userRepo := newMockUserRepository()
+	tenantRepo := newMockTenantRepository()
 	authzRepo := newMockAuthorizationRepository()
-	authzSvc, _ := service.NewAuthorizationService(authzRepo)
-	svc, _ := service.NewRoleAssignmentService(assignRepo, roleRepo, userRepo, tenantRepo, authzRepo, authzSvc)
+	svc, _ := service.NewRoleAssignmentService(assignRepo, roleRepo, userRepo, tenantRepo, authzRepo)
 
 	t.Run("GetPlatformRole success and not found", func(t *testing.T) {
 		assignRepo.getPlatformRole = func(ctx context.Context, u uuid.UUID) (*model.Role, error) {
@@ -560,7 +468,10 @@ func TestRoleAssignmentService_ReadOperations(t *testing.T) {
 	})
 
 	t.Run("GetTenantRole success and not found", func(t *testing.T) {
-		authzRepo.setTenantRole(userID, tenantID, &model.Role{ID: roleID, Name: "TENANT_MEMBER"})
+		assignRepo.tenantAssignments[userID] = map[uuid.UUID]uuid.UUID{
+			tenantID: roleID,
+		}
+		assignRepo.roles[roleID] = &model.Role{ID: roleID, Name: "TENANT_MEMBER"}
 
 		r, err := svc.GetTenantRole(ctx, userID, tenantID)
 		if err != nil || r == nil || r.Name != "TENANT_MEMBER" {

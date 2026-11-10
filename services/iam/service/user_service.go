@@ -55,6 +55,14 @@ func (s *UserService) GetUserByEmail(
 	return s.repo.GetByEmail(ctx, email)
 }
 
+func (s *UserService) SetUserStatus(
+	ctx context.Context,
+	id uuid.UUID,
+	status string,
+) error {
+	return s.repo.SetStatus(ctx, id, status)
+}
+
 func (s *UserService) CreateUser(
 	ctx context.Context,
 	input CreateUserInput,

@@ -1,35 +1,26 @@
 package handler
 
 import (
-	"errors"
 	"net/http"
 	"time"
 
+	"github.com/nooman57554/The_Orb/orb_libs/authorization"
 	"github.com/nooman57554/The_Orb/orb_libs/httpx"
 	"github.com/nooman57554/The_Orb/orb_libs/identity"
-	"github.com/nooman57554/The_Orb/services/iam/model"
-	"github.com/nooman57554/The_Orb/services/iam/repository"
 	"github.com/nooman57554/The_Orb/services/iam/service"
 )
 
 type PermissionHandler struct {
-	permRepo     repository.PermissionRepository
 	roleService  *service.RoleService
 	authzService *service.AuthorizationService
 }
 
 func NewPermissionHandler(
-	permRepo repository.PermissionRepository,
+	roleService *service.RoleService,
 	authzService *service.AuthorizationService,
-	roleService ...*service.RoleService,
 ) *PermissionHandler {
-	var rs *service.RoleService
-	if len(roleService) > 0 {
-		rs = roleService[0]
-	}
 	return &PermissionHandler{
-		permRepo:     permRepo,
-		roleService:  rs,
+		roleService:  roleService,
 		authzService: authzService,
 	}
 }
@@ -48,7 +39,7 @@ type listPermissionsResponse struct {
 
 func (h *PermissionHandler) ListPermissions(w http.ResponseWriter, r *http.Request) {
 	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok {
+	if !ok || principal == nil || !principal.IsValid() {
 		httpx.WriteProblem(
 			w,
 			http.StatusUnauthorized,
@@ -58,25 +49,54 @@ func (h *PermissionHandler) ListPermissions(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Permission catalog read is permitted with platform permission.read OR any tenant permission.read
-	err := h.authzService.AuthorizePlatform(r.Context(), principal, "permission.read")
-	if err != nil {
-		if errors.Is(err, service.ErrUnauthorized) {
-			httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
+	// Authorize permission catalog listing
+	tenantIDStr := r.URL.Query().Get("tenant_id")
+	var authReq authorization.AuthorizationRequest
+	if tenantIDStr != "" {
+		tenantID, parseErr := parseUUID(tenantIDStr)
+		if parseErr != nil {
+			httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "tenant_id must be a valid UUID.")
 			return
 		}
-		// If not platform, check if caller holds permission.read on their tenant if tenant_id query is provided
-		tenantIDStr := r.URL.Query().Get("tenant_id")
-		tenantAuthOk := false
-		if tenantIDStr != "" {
-			if tenantID, parseErr := parseUUID(tenantIDStr); parseErr == nil {
-				if tErr := h.authzService.AuthorizeTenant(r.Context(), principal, tenantID, "permission.read"); tErr == nil {
-					tenantAuthOk = true
-				}
+		authReq = authorization.AuthorizationRequest{
+			Principal:  principal,
+			Permission: authorization.PermTenantPermissionRead,
+			TenantID:   tenantID.String(),
+		}
+	} else {
+		authReq = authorization.AuthorizationRequest{
+			Principal:  principal,
+			Permission: authorization.PermPlatformRoleRead,
+		}
+	}
+
+	decision, err := h.authzService.Authorize(r.Context(), authReq)
+	if err != nil {
+		httpx.WriteProblem(
+			w,
+			http.StatusServiceUnavailable,
+			"Service Unavailable",
+			"Authorization policy is temporarily unavailable.",
+		)
+		return
+	}
+
+	if !decision.Allowed {
+		// If platform role read was denied and no tenant_id was specified, but caller is a tenant member
+		// checking permission catalog, evaluate if caller holds tenant permission.read on their principal tenant
+		allowed := false
+		if tenantIDStr == "" && principal.TenantID != nil {
+			fallbackReq := authorization.AuthorizationRequest{
+				Principal:  principal,
+				Permission: authorization.PermTenantPermissionRead,
+				TenantID:   principal.TenantID.String(),
+			}
+			if fbDec, fbErr := h.authzService.Authorize(r.Context(), fallbackReq); fbErr == nil && fbDec.Allowed {
+				allowed = true
 			}
 		}
 
-		if !tenantAuthOk {
+		if !allowed {
 			httpx.WriteProblem(
 				w,
 				http.StatusForbidden,
@@ -87,12 +107,7 @@ func (h *PermissionHandler) ListPermissions(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	var perms []model.Permission
-	if h.roleService != nil {
-		perms, err = h.roleService.ListPermissions(r.Context())
-	} else if h.permRepo != nil {
-		perms, err = h.permRepo.ListAll(r.Context())
-	}
+	perms, err := h.roleService.ListPermissions(r.Context())
 	if err != nil {
 		httpx.WriteProblem(
 			w,

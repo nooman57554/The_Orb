@@ -15,27 +15,12 @@ import (
 )
 
 type TenantHandler struct {
-	tenantRepo    repository.TenantRepository
 	tenantService *service.TenantService
-	authzService  *service.AuthorizationService
 }
 
-func NewTenantHandler(
-	tenantRepo repository.TenantRepository,
-	authzService *service.AuthorizationService,
-	tenantService ...*service.TenantService,
-) *TenantHandler {
-	var ts *service.TenantService
-	if len(tenantService) > 0 && tenantService[0] != nil {
-		ts = tenantService[0]
-	} else if tenantRepo != nil {
-		ts, _ = service.NewTenantService(tenantRepo)
-	}
-
+func NewTenantHandler(tenantService *service.TenantService) *TenantHandler {
 	return &TenantHandler{
-		tenantRepo:    tenantRepo,
-		tenantService: ts,
-		authzService:  authzService,
+		tenantService: tenantService,
 	}
 }
 
@@ -69,25 +54,6 @@ func formatTenant(t *model.Tenant) tenantResponse {
 }
 
 func (h *TenantHandler) CreateTenant(w http.ResponseWriter, r *http.Request) {
-	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok {
-		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-		return
-	}
-
-	if err := h.authzService.AuthorizePlatform(r.Context(), principal, "tenant.create"); err != nil {
-		if errors.Is(err, service.ErrUnauthorized) {
-			httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-			return
-		}
-		if errors.Is(err, service.ErrForbidden) {
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You are not authorized to create tenants.")
-			return
-		}
-		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
-		return
-	}
-
 	var req createTenantRequest
 	if err := decodeJSON(w, r, &req); err != nil {
 		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "Request body must contain valid JSON.")
@@ -124,25 +90,6 @@ func (h *TenantHandler) CreateTenant(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *TenantHandler) ListTenants(w http.ResponseWriter, r *http.Request) {
-	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok {
-		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-		return
-	}
-
-	if err := h.authzService.AuthorizePlatform(r.Context(), principal, "tenant.read"); err != nil {
-		if errors.Is(err, service.ErrUnauthorized) {
-			httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-			return
-		}
-		if errors.Is(err, service.ErrForbidden) {
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You are not authorized to list tenants.")
-			return
-		}
-		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
-		return
-	}
-
 	offset, limit := parsePagination(r)
 	page := (offset / limit) + 1
 
@@ -172,177 +119,7 @@ func (h *TenantHandler) ListTenants(w http.ResponseWriter, r *http.Request) {
 
 func (h *TenantHandler) GetTenant(w http.ResponseWriter, r *http.Request) {
 	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok {
-		httpx.WriteProblem(
-			w,
-			http.StatusUnauthorized,
-			"Unauthorized",
-			"Authentication is required.",
-		)
-		return
-	}
-
-	tenantID, err := uuid.Parse(r.PathValue("id"))
-	if err != nil {
-		httpx.WriteProblem(
-			w,
-			http.StatusBadRequest,
-			"Invalid Request",
-			"Tenant ID must be a valid UUID.",
-		)
-		return
-	}
-
-	if err := h.authzService.AuthorizeTenant(r.Context(), principal, tenantID, "tenant.read"); err != nil {
-		if errors.Is(err, service.ErrUnauthorized) {
-			httpx.WriteProblem(
-				w,
-				http.StatusUnauthorized,
-				"Unauthorized",
-				"Authentication is required.",
-			)
-			return
-		}
-		if errors.Is(err, service.ErrForbidden) {
-			httpx.WriteProblem(
-				w,
-				http.StatusForbidden,
-				"Forbidden",
-				"You are not authorized to access this tenant.",
-			)
-			return
-		}
-		httpx.WriteProblem(
-			w,
-			http.StatusInternalServerError,
-			"Internal Server Error",
-			"An unexpected error occurred.",
-		)
-		return
-	}
-
-	tenant, err := h.tenantService.GetTenantByID(r.Context(), tenantID)
-	if err != nil {
-		if errors.Is(err, service.ErrTenantNotFound) || errors.Is(err, repository.ErrNotFound) {
-			httpx.WriteProblem(
-				w,
-				http.StatusNotFound,
-				"Tenant Not Found",
-				"The requested tenant was not found.",
-			)
-			return
-		}
-		httpx.WriteProblem(
-			w,
-			http.StatusInternalServerError,
-			"Internal Server Error",
-			"An unexpected error occurred.",
-		)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, formatTenant(tenant))
-}
-
-func (h *TenantHandler) UpdateTenant(w http.ResponseWriter, r *http.Request) {
-	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok {
-		httpx.WriteProblem(
-			w,
-			http.StatusUnauthorized,
-			"Unauthorized",
-			"Authentication is required.",
-		)
-		return
-	}
-
-	tenantID, err := uuid.Parse(r.PathValue("id"))
-	if err != nil {
-		httpx.WriteProblem(
-			w,
-			http.StatusBadRequest,
-			"Invalid Request",
-			"Tenant ID must be a valid UUID.",
-		)
-		return
-	}
-
-	if err := h.authzService.AuthorizeTenant(r.Context(), principal, tenantID, "tenant.update"); err != nil {
-		if errors.Is(err, service.ErrUnauthorized) {
-			httpx.WriteProblem(
-				w,
-				http.StatusUnauthorized,
-				"Unauthorized",
-				"Authentication is required.",
-			)
-			return
-		}
-		if errors.Is(err, service.ErrForbidden) {
-			httpx.WriteProblem(
-				w,
-				http.StatusForbidden,
-				"Forbidden",
-				"You are not authorized to access this tenant.",
-			)
-			return
-		}
-		httpx.WriteProblem(
-			w,
-			http.StatusInternalServerError,
-			"Internal Server Error",
-			"An unexpected error occurred.",
-		)
-		return
-	}
-
-	var req updateTenantRequest
-	if err := decodeJSON(w, r, &req); err != nil {
-		httpx.WriteProblem(
-			w,
-			http.StatusBadRequest,
-			"Invalid Request",
-			"Request body must contain valid JSON.",
-		)
-		return
-	}
-
-	name := strings.TrimSpace(req.Name)
-	if name == "" {
-		httpx.WriteProblem(
-			w,
-			http.StatusBadRequest,
-			"Invalid Request",
-			"Tenant name cannot be empty.",
-		)
-		return
-	}
-
-	tenant, err := h.tenantService.UpdateTenant(r.Context(), tenantID, name)
-	if err != nil {
-		if errors.Is(err, service.ErrTenantNotFound) || errors.Is(err, repository.ErrNotFound) {
-			httpx.WriteProblem(
-				w,
-				http.StatusNotFound,
-				"Tenant Not Found",
-				"The requested tenant was not found.",
-			)
-			return
-		}
-		httpx.WriteProblem(
-			w,
-			http.StatusInternalServerError,
-			"Internal Server Error",
-			"An unexpected error occurred.",
-		)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, formatTenant(tenant))
-}
-
-func (h *TenantHandler) DeactivateTenant(w http.ResponseWriter, r *http.Request) {
-	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok {
+	if !ok || principal == nil || !principal.IsValid() {
 		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
 		return
 	}
@@ -353,21 +130,69 @@ func (h *TenantHandler) DeactivateTenant(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := h.authzService.AuthorizePlatform(r.Context(), principal, "tenant.deactivate"); err != nil {
-		if errors.Is(err, service.ErrUnauthorized) {
-			httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-			return
-		}
-		if errors.Is(err, service.ErrForbidden) {
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You are not authorized to deactivate tenants.")
+	tenant, err := h.tenantService.GetTenantByID(r.Context(), tenantID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) || errors.Is(err, service.ErrTenantNotFound) {
+			httpx.WriteProblem(w, http.StatusNotFound, "Tenant Not Found", "The requested tenant was not found.")
 			return
 		}
 		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
 		return
 	}
 
+	writeJSON(w, http.StatusOK, formatTenant(tenant))
+}
+
+func (h *TenantHandler) UpdateTenant(w http.ResponseWriter, r *http.Request) {
+	principal, ok := identity.PrincipalFromContext(r.Context())
+	if ok && principal != nil && !principal.IsValid() {
+		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
+		return
+	}
+
+	tenantID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "Tenant ID must be a valid UUID.")
+		return
+	}
+
+	var req updateTenantRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "Request body must contain valid JSON.")
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "Tenant name cannot be empty.")
+		return
+	}
+
+	tenant, err := h.tenantService.UpdateTenant(r.Context(), tenantID, name)
+	if err != nil {
+		switch {
+		case errors.Is(err, repository.ErrNotFound), errors.Is(err, service.ErrTenantNotFound):
+			httpx.WriteProblem(w, http.StatusNotFound, "Tenant Not Found", "The requested tenant was not found.")
+		case errors.Is(err, service.ErrInvalidTenantName):
+			httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "Tenant name cannot be empty.")
+		default:
+			httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, formatTenant(tenant))
+}
+
+func (h *TenantHandler) DeactivateTenant(w http.ResponseWriter, r *http.Request) {
+	tenantID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "Tenant ID must be a valid UUID.")
+		return
+	}
+
 	if err := h.tenantService.DeactivateTenant(r.Context(), tenantID); err != nil {
-		if errors.Is(err, service.ErrTenantNotFound) {
+		if errors.Is(err, repository.ErrNotFound) || errors.Is(err, service.ErrTenantNotFound) {
 			httpx.WriteProblem(w, http.StatusNotFound, "Tenant Not Found", "The requested tenant was not found.")
 			return
 		}
@@ -379,33 +204,14 @@ func (h *TenantHandler) DeactivateTenant(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *TenantHandler) ReactivateTenant(w http.ResponseWriter, r *http.Request) {
-	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok {
-		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-		return
-	}
-
 	tenantID, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "Tenant ID must be a valid UUID.")
 		return
 	}
 
-	if err := h.authzService.AuthorizePlatform(r.Context(), principal, "tenant.reactivate"); err != nil {
-		if errors.Is(err, service.ErrUnauthorized) {
-			httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-			return
-		}
-		if errors.Is(err, service.ErrForbidden) {
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You are not authorized to reactivate tenants.")
-			return
-		}
-		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
-		return
-	}
-
 	if err := h.tenantService.ReactivateTenant(r.Context(), tenantID); err != nil {
-		if errors.Is(err, service.ErrTenantNotFound) {
+		if errors.Is(err, repository.ErrNotFound) || errors.Is(err, service.ErrTenantNotFound) {
 			httpx.WriteProblem(w, http.StatusNotFound, "Tenant Not Found", "The requested tenant was not found.")
 			return
 		}

@@ -13,13 +13,26 @@ import (
 )
 
 type PostgresTenantRepository struct {
-	db *dbconnector.DBConnector
+	db         *dbconnector.DBConnector
+	outboxRepo OutboxRepository
 }
 
 var _ TenantRepository = (*PostgresTenantRepository)(nil)
 
-func NewPostgresTenantRepository(db *dbconnector.DBConnector) *PostgresTenantRepository {
-	return &PostgresTenantRepository{db: db}
+func NewPostgresTenantRepository(
+	db *dbconnector.DBConnector,
+	outboxRepo ...OutboxRepository,
+) *PostgresTenantRepository {
+	var ob OutboxRepository
+	if len(outboxRepo) > 0 && outboxRepo[0] != nil {
+		ob = outboxRepo[0]
+	} else {
+		ob = NewPostgresOutboxRepository(db)
+	}
+	return &PostgresTenantRepository{
+		db:         db,
+		outboxRepo: ob,
+	}
 }
 
 func (r *PostgresTenantRepository) GetByID(ctx context.Context, id uuid.UUID) (*model.Tenant, error) {
@@ -197,13 +210,19 @@ func (r *PostgresTenantRepository) SetStatus(ctx context.Context, id uuid.UUID, 
 		return fmt.Errorf("tenant id is required")
 	}
 
+	tx, err := r.db.Pool().Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
 	const query = `
 		UPDATE tenants
 		SET status = $1
 		WHERE id = $2
 	`
 
-	res, err := r.db.Pool().Exec(ctx, query, status, id)
+	res, err := tx.Exec(ctx, query, status, id)
 	if err != nil {
 		return fmt.Errorf("set tenant status: %w", err)
 	}
@@ -212,5 +231,15 @@ func (r *PostgresTenantRepository) SetStatus(ctx context.Context, id uuid.UUID, 
 		return fmt.Errorf("tenant: %w", ErrNotFound)
 	}
 
-	return nil
+	if r.outboxRepo != nil {
+		payload := map[string]string{
+			"tenant_id": id.String(),
+			"status":    status,
+		}
+		if _, err := r.outboxRepo.WriteEvent(ctx, tx, EventTenantStatusChanged, "tenant", id.String(), payload); err != nil {
+			return fmt.Errorf("write outbox event: %w", err)
+		}
+	}
+
+	return tx.Commit(ctx)
 }

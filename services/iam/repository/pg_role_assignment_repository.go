@@ -12,13 +12,26 @@ import (
 )
 
 type PostgresRoleAssignmentRepository struct {
-	db *dbconnector.DBConnector
+	db         *dbconnector.DBConnector
+	outboxRepo OutboxRepository
 }
 
 var _ RoleAssignmentRepository = (*PostgresRoleAssignmentRepository)(nil)
 
-func NewPostgresRoleAssignmentRepository(db *dbconnector.DBConnector) *PostgresRoleAssignmentRepository {
-	return &PostgresRoleAssignmentRepository{db: db}
+func NewPostgresRoleAssignmentRepository(
+	db *dbconnector.DBConnector,
+	outboxRepo ...OutboxRepository,
+) *PostgresRoleAssignmentRepository {
+	var ob OutboxRepository
+	if len(outboxRepo) > 0 && outboxRepo[0] != nil {
+		ob = outboxRepo[0]
+	} else {
+		ob = NewPostgresOutboxRepository(db)
+	}
+	return &PostgresRoleAssignmentRepository{
+		db:         db,
+		outboxRepo: ob,
+	}
 }
 
 func (r *PostgresRoleAssignmentRepository) AssignTenantRole(
@@ -45,17 +58,15 @@ func (r *PostgresRoleAssignmentRepository) AssignTenantRole(
 		return fmt.Errorf("lock tenant: %w", err)
 	}
 
-	// 1. Check if the new role has tenant admin capabilities
+	// 1. Check if the new role is the protected TENANT_ADMIN_RW
 	const checkNewRoleQuery = `
-		SELECT EXISTS (
-			SELECT 1 FROM roles r
-			LEFT JOIN role_permissions rp ON rp.role_id = r.id
-			LEFT JOIN permissions p ON p.id = rp.permission_id AND p.scope = 'tenant'
-			WHERE r.id = $1 AND (r.name = 'TENANT_ADMIN_RW' OR p.name IN ('user.assign_role', 'role.assign'))
-		)
+		SELECT (name = 'TENANT_ADMIN_RW') FROM roles WHERE id = $1
 	`
 	var newRoleIsAdmin bool
 	if err := tx.QueryRow(ctx, checkNewRoleQuery, roleID).Scan(&newRoleIsAdmin); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("target role: %w", ErrNotFound)
+		}
 		return fmt.Errorf("check new role admin capabilities: %w", err)
 	}
 
@@ -67,11 +78,9 @@ func (r *PostgresRoleAssignmentRepository) AssignTenantRole(
 			JOIN users u ON u.id = ra.user_id
 			JOIN tenants t ON t.id = ra.tenant_id
 			JOIN roles r ON r.id = ra.role_id
-			LEFT JOIN role_permissions rp ON rp.role_id = r.id
-			LEFT JOIN permissions p ON p.id = rp.permission_id AND p.scope = 'tenant'
 			WHERE ra.user_id = $1 AND ra.tenant_id = $2
 			  AND u.status = 'active' AND t.status = 'active'
-			  AND (r.name = 'TENANT_ADMIN_RW' OR p.name IN ('user.assign_role', 'role.assign'))
+			  AND r.name = 'TENANT_ADMIN_RW'
 		)
 	`
 	var currentIsAdmin bool
@@ -79,7 +88,7 @@ func (r *PostgresRoleAssignmentRepository) AssignTenantRole(
 		return fmt.Errorf("check current role admin capabilities: %w", err)
 	}
 
-	// 3. If demoting an active admin to a non-admin role, check count
+	// 3. If demoting an active admin to a non-admin role, enforce last-admin invariant
 	if currentIsAdmin && !newRoleIsAdmin {
 		const countQuery = `
 			SELECT COUNT(DISTINCT ra.user_id)
@@ -87,12 +96,10 @@ func (r *PostgresRoleAssignmentRepository) AssignTenantRole(
 			JOIN users u ON u.id = ra.user_id
 			JOIN tenants t ON t.id = ra.tenant_id
 			JOIN roles r ON r.id = ra.role_id
-			LEFT JOIN role_permissions rp ON rp.role_id = r.id
-			LEFT JOIN permissions p ON p.id = rp.permission_id AND p.scope = 'tenant'
 			WHERE ra.tenant_id = $1
 			  AND u.status = 'active'
 			  AND t.status = 'active'
-			  AND (r.name = 'TENANT_ADMIN_RW' OR p.name IN ('user.assign_role', 'role.assign'))
+			  AND r.name = 'TENANT_ADMIN_RW'
 		`
 		var count int
 		if err := tx.QueryRow(ctx, countQuery, tenantID).Scan(&count); err != nil {
@@ -117,6 +124,18 @@ func (r *PostgresRoleAssignmentRepository) AssignTenantRole(
 	`
 	if _, err := tx.Exec(ctx, upsertQuery, id, userID, tenantID, roleID); err != nil {
 		return fmt.Errorf("assign tenant role: %w", err)
+	}
+
+	// 5. Emit transactional outbox event
+	if r.outboxRepo != nil {
+		payload := map[string]string{
+			"user_id":   userID.String(),
+			"tenant_id": tenantID.String(),
+			"role_id":   roleID.String(),
+		}
+		if _, err := r.outboxRepo.WriteEvent(ctx, tx, EventTenantRoleAssigned, "tenant", tenantID.String(), payload); err != nil {
+			return fmt.Errorf("write outbox event: %w", err)
+		}
 	}
 
 	return tx.Commit(ctx)
@@ -154,11 +173,9 @@ func (r *PostgresRoleAssignmentRepository) RemoveTenantRole(
 			JOIN users u ON u.id = ra.user_id
 			JOIN tenants t ON t.id = ra.tenant_id
 			JOIN roles r ON r.id = ra.role_id
-			LEFT JOIN role_permissions rp ON rp.role_id = r.id
-			LEFT JOIN permissions p ON p.id = rp.permission_id AND p.scope = 'tenant'
 			WHERE ra.user_id = $1 AND ra.tenant_id = $2
 			  AND u.status = 'active' AND t.status = 'active'
-			  AND (r.name = 'TENANT_ADMIN_RW' OR p.name IN ('user.assign_role', 'role.assign'))
+			  AND r.name = 'TENANT_ADMIN_RW'
 		)
 	`
 	var currentIsAdmin bool
@@ -166,6 +183,7 @@ func (r *PostgresRoleAssignmentRepository) RemoveTenantRole(
 		return fmt.Errorf("check current role admin capabilities: %w", err)
 	}
 
+	// 2. If removing an active admin, enforce last admin invariant
 	if currentIsAdmin {
 		const countQuery = `
 			SELECT COUNT(DISTINCT ra.user_id)
@@ -173,12 +191,10 @@ func (r *PostgresRoleAssignmentRepository) RemoveTenantRole(
 			JOIN users u ON u.id = ra.user_id
 			JOIN tenants t ON t.id = ra.tenant_id
 			JOIN roles r ON r.id = ra.role_id
-			LEFT JOIN role_permissions rp ON rp.role_id = r.id
-			LEFT JOIN permissions p ON p.id = rp.permission_id AND p.scope = 'tenant'
 			WHERE ra.tenant_id = $1
 			  AND u.status = 'active'
 			  AND t.status = 'active'
-			  AND (r.name = 'TENANT_ADMIN_RW' OR p.name IN ('user.assign_role', 'role.assign'))
+			  AND r.name = 'TENANT_ADMIN_RW'
 		`
 		var count int
 		if err := tx.QueryRow(ctx, countQuery, tenantID).Scan(&count); err != nil {
@@ -189,16 +205,28 @@ func (r *PostgresRoleAssignmentRepository) RemoveTenantRole(
 		}
 	}
 
+	// 3. Delete assignment
 	const deleteQuery = `
 		DELETE FROM role_assignments
 		WHERE user_id = $1 AND tenant_id = $2
 	`
 	res, err := tx.Exec(ctx, deleteQuery, userID, tenantID)
 	if err != nil {
-		return fmt.Errorf("remove tenant role: %w", err)
+		return fmt.Errorf("delete tenant role: %w", err)
 	}
 	if res.RowsAffected() == 0 {
 		return fmt.Errorf("membership: %w", ErrNotFound)
+	}
+
+	// 4. Emit transactional outbox event
+	if r.outboxRepo != nil {
+		payload := map[string]string{
+			"user_id":   userID.String(),
+			"tenant_id": tenantID.String(),
+		}
+		if _, err := r.outboxRepo.WriteEvent(ctx, tx, EventTenantRoleRemoved, "tenant", tenantID.String(), payload); err != nil {
+			return fmt.Errorf("write outbox event: %w", err)
+		}
 	}
 
 	return tx.Commit(ctx)
@@ -258,6 +286,86 @@ func (r *PostgresRoleAssignmentRepository) ListUsersByTenantRole(
 	return records, nil
 }
 
+func (r *PostgresRoleAssignmentRepository) CountActiveTenantAdmins(ctx context.Context, tenantID uuid.UUID) (int, error) {
+	if tenantID == uuid.Nil {
+		return 0, fmt.Errorf("tenant ID is required")
+	}
+
+	const query = `
+		SELECT COUNT(DISTINCT ra.user_id)
+		FROM role_assignments ra
+		JOIN users u ON u.id = ra.user_id
+		JOIN tenants t ON t.id = ra.tenant_id
+		JOIN roles r ON r.id = ra.role_id
+		WHERE ra.tenant_id = $1
+		  AND u.status = 'active'
+		  AND t.status = 'active'
+		  AND r.name = 'TENANT_ADMIN_RW'
+	`
+
+	var count int
+	if err := r.db.Pool().QueryRow(ctx, query, tenantID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count active tenant admins: %w", err)
+	}
+	return count, nil
+}
+
+func (r *PostgresRoleAssignmentRepository) GetTenantRole(ctx context.Context, userID, tenantID uuid.UUID) (*model.Role, error) {
+	if userID == uuid.Nil || tenantID == uuid.Nil {
+		return nil, fmt.Errorf("user ID and tenant ID are required")
+	}
+
+	const query = `
+		SELECT r.id, r.name, r.scope, r.tenant_id, r.description, r.created_at, r.updated_at
+		FROM role_assignments ra
+		JOIN roles r ON r.id = ra.role_id
+		WHERE ra.user_id = $1 AND ra.tenant_id = $2
+	`
+
+	var role model.Role
+	err := r.db.Pool().QueryRow(ctx, query, userID, tenantID).Scan(
+		&role.ID,
+		&role.Name,
+		&role.Scope,
+		&role.TenantID,
+		&role.Description,
+		&role.CreatedAt,
+		&role.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("get tenant role: %w", err)
+	}
+
+	return &role, nil
+}
+
+func (r *PostgresRoleAssignmentRepository) UserBelongsToTenant(ctx context.Context, userID, tenantID uuid.UUID) (bool, error) {
+	if userID == uuid.Nil || tenantID == uuid.Nil {
+		return false, nil
+	}
+
+	const query = `
+		SELECT EXISTS (
+			SELECT 1
+			FROM role_assignments ra
+			JOIN users u ON u.id = ra.user_id
+			JOIN tenants t ON t.id = ra.tenant_id
+			WHERE ra.user_id = $1
+			  AND ra.tenant_id = $2
+			  AND u.status = 'active'
+			  AND t.status = 'active'
+		)
+	`
+	var belongs bool
+	if err := r.db.Pool().QueryRow(ctx, query, userID, tenantID).Scan(&belongs); err != nil {
+		return false, fmt.Errorf("check user belongs to tenant: %w", err)
+	}
+	return belongs, nil
+}
+
 func (r *PostgresRoleAssignmentRepository) AssignPlatformRole(
 	ctx context.Context,
 	userID, roleID uuid.UUID,
@@ -277,17 +385,15 @@ func (r *PostgresRoleAssignmentRepository) AssignPlatformRole(
 		return fmt.Errorf("acquire platform advisory lock: %w", err)
 	}
 
-	// 1. Check if the new role has platform admin capabilities
+	// 1. Check if the new role is PLATFORM_ADMIN
 	const checkNewRoleQuery = `
-		SELECT EXISTS (
-			SELECT 1 FROM roles r
-			LEFT JOIN role_permissions rp ON rp.role_id = r.id
-			LEFT JOIN permissions p ON p.id = rp.permission_id AND p.scope = 'platform'
-			WHERE r.id = $1 AND r.scope = 'platform' AND (r.name = 'PLATFORM_ADMIN' OR p.name = 'role.assign')
-		)
+		SELECT (name = 'PLATFORM_ADMIN') FROM roles WHERE id = $1 AND scope = 'platform'
 	`
 	var newRoleIsAdmin bool
 	if err := tx.QueryRow(ctx, checkNewRoleQuery, roleID).Scan(&newRoleIsAdmin); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("platform role: %w", ErrNotFound)
+		}
 		return fmt.Errorf("check new role admin capabilities: %w", err)
 	}
 
@@ -298,10 +404,8 @@ func (r *PostgresRoleAssignmentRepository) AssignPlatformRole(
 			FROM role_assignments ra
 			JOIN users u ON u.id = ra.user_id
 			JOIN roles r ON r.id = ra.role_id
-			LEFT JOIN role_permissions rp ON rp.role_id = r.id
-			LEFT JOIN permissions p ON p.id = rp.permission_id AND p.scope = 'platform'
 			WHERE ra.user_id = $1 AND ra.tenant_id IS NULL AND u.status = 'active'
-			  AND (r.name = 'PLATFORM_ADMIN' OR p.name = 'role.assign')
+			  AND r.name = 'PLATFORM_ADMIN'
 		)
 	`
 	var currentIsAdmin bool
@@ -309,19 +413,17 @@ func (r *PostgresRoleAssignmentRepository) AssignPlatformRole(
 		return fmt.Errorf("check current role admin capabilities: %w", err)
 	}
 
-	// 3. If demoting an active admin to a non-admin role, check count
+	// 3. If demoting an active admin to a non-admin role, check last admin count
 	if currentIsAdmin && !newRoleIsAdmin {
 		const countQuery = `
 			SELECT COUNT(DISTINCT ra.user_id)
 			FROM role_assignments ra
 			JOIN users u ON u.id = ra.user_id
 			JOIN roles r ON r.id = ra.role_id
-			LEFT JOIN role_permissions rp ON rp.role_id = r.id
-			LEFT JOIN permissions p ON p.id = rp.permission_id AND p.scope = 'platform'
 			WHERE ra.tenant_id IS NULL
 			  AND u.status = 'active'
 			  AND r.scope = 'platform'
-			  AND (r.name = 'PLATFORM_ADMIN' OR p.name = 'role.assign')
+			  AND r.name = 'PLATFORM_ADMIN'
 		`
 		var count int
 		if err := tx.QueryRow(ctx, countQuery).Scan(&count); err != nil {
@@ -348,6 +450,17 @@ func (r *PostgresRoleAssignmentRepository) AssignPlatformRole(
 		return fmt.Errorf("assign platform role: %w", err)
 	}
 
+	// 5. Emit transactional outbox event
+	if r.outboxRepo != nil {
+		payload := map[string]string{
+			"user_id": userID.String(),
+			"role_id": roleID.String(),
+		}
+		if _, err := r.outboxRepo.WriteEvent(ctx, tx, EventPlatformRoleAssigned, "platform", "platform", payload); err != nil {
+			return fmt.Errorf("write outbox event: %w", err)
+		}
+	}
+
 	return tx.Commit(ctx)
 }
 
@@ -370,17 +483,15 @@ func (r *PostgresRoleAssignmentRepository) RemovePlatformRole(
 		return fmt.Errorf("acquire platform advisory lock: %w", err)
 	}
 
-	// 1. Check if user has an active platform role assignment
+	// 1. Check if the current user assignment is an active platform admin
 	const checkCurrentAdminQuery = `
 		SELECT EXISTS (
 			SELECT 1
 			FROM role_assignments ra
 			JOIN users u ON u.id = ra.user_id
 			JOIN roles r ON r.id = ra.role_id
-			LEFT JOIN role_permissions rp ON rp.role_id = r.id
-			LEFT JOIN permissions p ON p.id = rp.permission_id AND p.scope = 'platform'
 			WHERE ra.user_id = $1 AND ra.tenant_id IS NULL AND u.status = 'active'
-			  AND (r.name = 'PLATFORM_ADMIN' OR p.name = 'role.assign')
+			  AND r.name = 'PLATFORM_ADMIN'
 		)
 	`
 	var currentIsAdmin bool
@@ -388,18 +499,17 @@ func (r *PostgresRoleAssignmentRepository) RemovePlatformRole(
 		return fmt.Errorf("check current role admin capabilities: %w", err)
 	}
 
+	// 2. If removing an active admin, enforce last admin invariant
 	if currentIsAdmin {
 		const countQuery = `
 			SELECT COUNT(DISTINCT ra.user_id)
 			FROM role_assignments ra
 			JOIN users u ON u.id = ra.user_id
 			JOIN roles r ON r.id = ra.role_id
-			LEFT JOIN role_permissions rp ON rp.role_id = r.id
-			LEFT JOIN permissions p ON p.id = rp.permission_id AND p.scope = 'platform'
 			WHERE ra.tenant_id IS NULL
 			  AND u.status = 'active'
 			  AND r.scope = 'platform'
-			  AND (r.name = 'PLATFORM_ADMIN' OR p.name = 'role.assign')
+			  AND r.name = 'PLATFORM_ADMIN'
 		`
 		var count int
 		if err := tx.QueryRow(ctx, countQuery).Scan(&count); err != nil {
@@ -410,16 +520,27 @@ func (r *PostgresRoleAssignmentRepository) RemovePlatformRole(
 		}
 	}
 
+	// 3. Delete assignment
 	const deleteQuery = `
 		DELETE FROM role_assignments
 		WHERE user_id = $1 AND tenant_id IS NULL
 	`
 	res, err := tx.Exec(ctx, deleteQuery, userID)
 	if err != nil {
-		return fmt.Errorf("remove platform role: %w", err)
+		return fmt.Errorf("delete platform role: %w", err)
 	}
 	if res.RowsAffected() == 0 {
 		return fmt.Errorf("platform role assignment: %w", ErrNotFound)
+	}
+
+	// 4. Emit transactional outbox event
+	if r.outboxRepo != nil {
+		payload := map[string]string{
+			"user_id": userID.String(),
+		}
+		if _, err := r.outboxRepo.WriteEvent(ctx, tx, EventPlatformRoleRemoved, "platform", "platform", payload); err != nil {
+			return fmt.Errorf("write outbox event: %w", err)
+		}
 	}
 
 	return tx.Commit(ctx)
@@ -434,14 +555,7 @@ func (r *PostgresRoleAssignmentRepository) GetPlatformRole(
 	}
 
 	const query = `
-		SELECT
-			r.id,
-			r.name,
-			r.scope,
-			r.tenant_id,
-			r.description,
-			r.created_at,
-			r.updated_at
+		SELECT r.id, r.name, r.scope, r.tenant_id, r.description, r.created_at, r.updated_at
 		FROM role_assignments ra
 		JOIN roles r ON r.id = ra.role_id
 		WHERE ra.user_id = $1 AND ra.tenant_id IS NULL
@@ -459,7 +573,7 @@ func (r *PostgresRoleAssignmentRepository) GetPlatformRole(
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("platform role: %w", ErrNotFound)
+			return nil, ErrNotFound
 		}
 		return nil, fmt.Errorf("get platform role: %w", err)
 	}
@@ -467,25 +581,20 @@ func (r *PostgresRoleAssignmentRepository) GetPlatformRole(
 	return &role, nil
 }
 
-func (r *PostgresRoleAssignmentRepository) CountPlatformAdmins(
-	ctx context.Context,
-) (int, error) {
+func (r *PostgresRoleAssignmentRepository) CountPlatformAdmins(ctx context.Context) (int, error) {
 	const query = `
 		SELECT COUNT(DISTINCT ra.user_id)
 		FROM role_assignments ra
 		JOIN users u ON u.id = ra.user_id
 		JOIN roles r ON r.id = ra.role_id
-		LEFT JOIN role_permissions rp ON rp.role_id = r.id
-		LEFT JOIN permissions p ON p.id = rp.permission_id AND p.scope = 'platform'
 		WHERE ra.tenant_id IS NULL
 		  AND u.status = 'active'
 		  AND r.scope = 'platform'
-		  AND (r.name = 'PLATFORM_ADMIN' OR p.name = 'role.assign')
+		  AND r.name = 'PLATFORM_ADMIN'
 	`
 
 	var count int
-	err := r.db.Pool().QueryRow(ctx, query).Scan(&count)
-	if err != nil {
+	if err := r.db.Pool().QueryRow(ctx, query).Scan(&count); err != nil {
 		return 0, fmt.Errorf("count platform admins: %w", err)
 	}
 

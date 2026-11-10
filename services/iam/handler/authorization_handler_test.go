@@ -6,16 +6,19 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/nooman57554/The_Orb/orb_libs/authorization"
 	"github.com/nooman57554/The_Orb/orb_libs/identity"
 	"github.com/nooman57554/The_Orb/services/iam/handler"
 	"github.com/nooman57554/The_Orb/services/iam/service"
 )
 
 func TestAuthorizationHandler_Check_Allowed(t *testing.T) {
-	authzRepo := newMockAuthzRepository()
-	authzService, err := service.NewAuthorizationService(authzRepo)
+	holder := authorization.NewSnapshotHolder()
+	engine := authorization.NewLocalEngine(holder)
+	authzService, err := service.NewAuthorizationService(engine)
 	if err != nil {
 		t.Fatalf("failed to create authorization service: %v", err)
 	}
@@ -24,7 +27,31 @@ func TestAuthorizationHandler_Check_Allowed(t *testing.T) {
 
 	userID := uuid.New()
 	tenantID := uuid.New()
-	authzRepo.grantTenant(userID, tenantID, "user.read")
+	roleID := uuid.New()
+
+	snap := &authorization.PolicySnapshot{
+		Version:   1,
+		CreatedAt: time.Now(),
+		Users: map[string]authorization.UserPolicy{
+			userID.String(): {Active: true},
+		},
+		TenantAssignments: map[string]map[string]string{
+			userID.String(): {tenantID.String(): roleID.String()},
+		},
+		Roles: map[string]authorization.RolePolicy{
+			roleID.String(): {
+				ID:          roleID.String(),
+				Scope:       authorization.RoleScopeSystemTenant,
+				Permissions: []string{"tenant.user.read"},
+			},
+		},
+		Permissions: map[string]authorization.PermissionDefinition{
+			"tenant.user.read": {Name: "tenant.user.read", Scope: authorization.ScopeTenant},
+		},
+	}
+	if err := holder.Set(snap); err != nil {
+		t.Fatalf("failed to set snapshot: %v", err)
+	}
 
 	principal := &identity.Principal{
 		UserID:    userID,
@@ -33,7 +60,7 @@ func TestAuthorizationHandler_Check_Allowed(t *testing.T) {
 	}
 
 	body, _ := json.Marshal(map[string]any{
-		"action":        "user.read",
+		"action":        "tenant.user.read",
 		"resource_type": "user",
 		"tenant_id":     tenantID.String(),
 	})
@@ -60,8 +87,9 @@ func TestAuthorizationHandler_Check_Allowed(t *testing.T) {
 }
 
 func TestAuthorizationHandler_Check_Denied(t *testing.T) {
-	authzRepo := newMockAuthzRepository()
-	authzService, err := service.NewAuthorizationService(authzRepo)
+	holder := authorization.NewSnapshotHolder()
+	engine := authorization.NewLocalEngine(holder)
+	authzService, err := service.NewAuthorizationService(engine)
 	if err != nil {
 		t.Fatalf("failed to create authorization service: %v", err)
 	}
@@ -70,7 +98,21 @@ func TestAuthorizationHandler_Check_Denied(t *testing.T) {
 
 	userID := uuid.New()
 	tenantID := uuid.New()
-	// No permissions granted
+
+	snap := &authorization.PolicySnapshot{
+		Version:             1,
+		CreatedAt:           time.Now(),
+		Users:               map[string]authorization.UserPolicy{userID.String(): {Active: true}},
+		PlatformAssignments: map[string]string{},
+		TenantAssignments:   map[string]map[string]string{},
+		Roles:               map[string]authorization.RolePolicy{},
+		Permissions: map[string]authorization.PermissionDefinition{
+			"tenant.user.read": {Name: "tenant.user.read", Scope: authorization.ScopeTenant},
+		},
+	}
+	if err := holder.Set(snap); err != nil {
+		t.Fatalf("failed to set snapshot: %v", err)
+	}
 
 	principal := &identity.Principal{
 		UserID:    userID,
@@ -79,7 +121,7 @@ func TestAuthorizationHandler_Check_Denied(t *testing.T) {
 	}
 
 	body, _ := json.Marshal(map[string]any{
-		"action":        "user.read",
+		"action":        "tenant.user.read",
 		"resource_type": "user",
 		"tenant_id":     tenantID.String(),
 	})
@@ -107,12 +149,13 @@ func TestAuthorizationHandler_Check_Denied(t *testing.T) {
 }
 
 func TestAuthorizationHandler_Check_Unauthenticated(t *testing.T) {
-	authzRepo := newMockAuthzRepository()
-	authzService, _ := service.NewAuthorizationService(authzRepo)
+	holder := authorization.NewSnapshotHolder()
+	engine := authorization.NewLocalEngine(holder)
+	authzService, _ := service.NewAuthorizationService(engine)
 	h := handler.NewAuthorizationHandler(authzService)
 
 	body, _ := json.Marshal(map[string]any{
-		"action": "user.read",
+		"action": authorization.PermTenantUserRead,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/v1/authorization/check", bytes.NewReader(body))
 	rec := httptest.NewRecorder()

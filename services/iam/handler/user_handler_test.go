@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/nooman57554/The_Orb/orb_libs/authorization"
 	"github.com/nooman57554/The_Orb/orb_libs/httpx"
 	"github.com/nooman57554/The_Orb/orb_libs/identity"
 	"github.com/nooman57554/The_Orb/orb_libs/identity/httpauth"
@@ -263,6 +264,51 @@ func (m *mockAuthzRepository) IsUserActive(ctx context.Context, userID uuid.UUID
 		return false, errors.New("database connection refused: i/o timeout")
 	}
 	return true, nil
+}
+
+func (m *mockAuthzRepository) SnapshotVersion() int64     { return 1 }
+func (m *mockAuthzRepository) SnapshotAge() time.Duration { return 0 }
+func (m *mockAuthzRepository) IsReady() bool              { return true }
+
+func (m *mockAuthzRepository) Authorize(ctx context.Context, req authorization.AuthorizationRequest) (authorization.Decision, error) {
+	if m.forceError {
+		return authorization.Decision{}, errors.New("database connection refused: i/o timeout")
+	}
+	if req.Principal == nil || !req.Principal.IsValid() {
+		return authorization.Decision{Allowed: false, Reason: authorization.ReasonUnauthenticated}, nil
+	}
+	// Self-profile access
+	if req.ResourceType == "user" && req.ResourceID == req.Principal.UserID.String() {
+		return authorization.Decision{Allowed: true, Reason: authorization.ReasonAllowed}, nil
+	}
+	scope, exists := authorization.ScopeOf(req.Permission)
+	if !exists {
+		if strings.HasPrefix(req.Permission, "platform.") {
+			scope = authorization.ScopePlatform
+		} else {
+			scope = authorization.ScopeTenant
+		}
+	}
+
+	if scope == authorization.ScopePlatform {
+		if m.platformPerms[req.Principal.UserID] != nil {
+			if m.platformPerms[req.Principal.UserID][req.Permission] {
+				return authorization.Decision{Allowed: true, Reason: authorization.ReasonAllowed}, nil
+			}
+		}
+		return authorization.Decision{Allowed: false, Reason: authorization.ReasonMissingPermission}, nil
+	}
+
+	// Tenant scope: must NOT check platform perms!
+	if req.TenantID != "" {
+		tID, err := uuid.Parse(req.TenantID)
+		if err == nil && m.tenantPerms[req.Principal.UserID] != nil && m.tenantPerms[req.Principal.UserID][tID] != nil {
+			if m.tenantPerms[req.Principal.UserID][tID][req.Permission] {
+				return authorization.Decision{Allowed: true, Reason: authorization.ReasonAllowed}, nil
+			}
+		}
+	}
+	return authorization.Decision{Allowed: false, Reason: authorization.ReasonMissingPermission}, nil
 }
 
 type handlerFixture struct {
@@ -573,8 +619,8 @@ func TestUserHandler_GetUser_PlatformAdmin_OtherUserLookup_Success(t *testing.T)
 	_ = f.userRepo.Create(context.Background(), admin)
 	_ = f.userRepo.Create(context.Background(), victim)
 
-	// Grant platform-scoped user.read to admin
-	f.authzRepo.grantPlatform(admin.ID, "user.read")
+	// Grant platform-scoped platform.user.read to admin
+	f.authzRepo.grantPlatform(admin.ID, authorization.PermPlatformUserRead)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/users/"+victim.ID.String(), nil)
 	req.SetPathValue("id", victim.ID.String())
@@ -614,9 +660,9 @@ func TestUserHandler_GetUser_TenantAdmin_OtherUserLookup_Forbidden(t *testing.T)
 	_ = f.userRepo.Create(context.Background(), tenantAdmin)
 	_ = f.userRepo.Create(context.Background(), otherUser)
 
-	// Grant tenant-scoped user.read to tenantAdmin in tenant1
+	// Grant tenant-scoped tenant.user.read to tenantAdmin in tenant1
 	tenant1 := uuid.New()
-	f.authzRepo.grantTenant(tenantAdmin.ID, tenant1, "user.read")
+	f.authzRepo.grantTenant(tenantAdmin.ID, tenant1, authorization.PermTenantUserRead)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/users/"+otherUser.ID.String(), nil)
 	req.SetPathValue("id", otherUser.ID.String())
@@ -632,9 +678,9 @@ func TestUserHandler_GetUser_TenantAdmin_OtherUserLookup_Forbidden(t *testing.T)
 	rec := httptest.NewRecorder()
 	f.userHandler.GetUser(rec, req)
 
-	// CRITICAL RULE: Tenant-scoped user.read must NOT grant platform-wide user lookup!
+	// CRITICAL RULE: Tenant-scoped tenant.user.read must NOT grant platform-wide user lookup!
 	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 Forbidden: tenant-scoped user.read must not authorize platform-wide user lookup, got %d", rec.Code)
+		t.Fatalf("expected 403 Forbidden: tenant-scoped tenant.user.read must not authorize platform-wide user lookup, got %d", rec.Code)
 	}
 }
 

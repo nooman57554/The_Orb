@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/nooman57554/The_Orb/orb_libs/authorization"
 	"github.com/nooman57554/The_Orb/orb_libs/identity"
 	"github.com/nooman57554/The_Orb/services/iam/handler"
 	"github.com/nooman57554/The_Orb/services/iam/model"
@@ -79,7 +80,6 @@ func TestTenantUserHandler_ProvisionUser_Success(t *testing.T) {
 	roleRepo := &mockRoleRepoForHandler{roles: make(map[uuid.UUID]*model.Role)}
 	roleAssignRepo := &mockRoleAssignRepoForHandler{members: make(map[uuid.UUID][]model.TenantMemberRecord)}
 	authzRepo := newMockAuthzRepository()
-	sessionRepo := newMockSessionRepository(userRepo)
 
 	tenantID := uuid.New()
 	tenantRepo.Create(context.Background(), &model.Tenant{ID: tenantID, Status: "active"})
@@ -91,13 +91,14 @@ func TestTenantUserHandler_ProvisionUser_Success(t *testing.T) {
 		Scope: model.RoleScopeSystemTenant,
 	}
 
-	authzService, _ := service.NewAuthorizationService(authzRepo)
-	tenantUserService, _ := service.NewTenantUserService(userRepo, tenantRepo, roleRepo, roleAssignRepo, authzRepo, sessionRepo, authzService)
+	roleAssignSvc, _ := service.NewRoleAssignmentService(roleAssignRepo, roleRepo, userRepo, tenantRepo, authzRepo)
+	tenantUserService, _ := service.NewTenantUserService(userRepo, tenantRepo, roleRepo, roleAssignSvc, authzRepo)
 
 	callerID := uuid.New()
-	authzRepo.grantTenant(callerID, tenantID, "user.create")
+	authzRepo.grantPlatform(callerID, authorization.PermPlatformRoleAssign)
+	authzRepo.grantTenant(callerID, tenantID, authorization.PermTenantUserCreate)
 
-	h := handler.NewTenantUserHandler(tenantUserService, authzService)
+	h := handler.NewTenantUserHandler(tenantUserService, roleAssignSvc)
 
 	body, _ := json.Marshal(map[string]any{
 		"email":    "alice@example.com",
@@ -121,40 +122,48 @@ func TestTenantUserHandler_DemoteLastAdmin_Conflict(t *testing.T) {
 	userRepo := newMockUserRepoForHandler()
 	tenantRepo := newMockTenantRepository()
 	roleRepo := &mockRoleRepoForHandler{roles: make(map[uuid.UUID]*model.Role)}
-	roleAssignRepo := &mockRoleAssignRepoForHandler{members: make(map[uuid.UUID][]model.TenantMemberRecord)}
+	roleAssignRepo := &mockRoleAssignRepoForHandler{
+		members: make(map[uuid.UUID][]model.TenantMemberRecord),
+	}
 	authzRepo := newMockAuthzRepository()
-	sessionRepo := newMockSessionRepository(userRepo)
 
 	tenantID := uuid.New()
 	tenantRepo.Create(context.Background(), &model.Tenant{ID: tenantID, Status: "active"})
 
 	adminRoleID := uuid.New()
-	roleRepo.roles[adminRoleID] = &model.Role{
+	adminRole := &model.Role{
 		ID:    adminRoleID,
 		Name:  "TENANT_ADMIN_RW",
 		Scope: model.RoleScopeSystemTenant,
 		Permissions: []model.Permission{
-			{Name: "user.assign_role"},
+			{Name: authorization.PermTenantUserAssignRole},
 		},
 	}
+	roleRepo.roles[adminRoleID] = adminRole
 
 	memberRoleID := uuid.New()
-	roleRepo.roles[memberRoleID] = &model.Role{
+	memberRole := &model.Role{
 		ID:    memberRoleID,
 		Name:  "TENANT_USER",
 		Scope: model.RoleScopeSystemTenant,
 	}
+	roleRepo.roles[memberRoleID] = memberRole
 
 	adminUserID := uuid.New()
 	userRepo.Create(context.Background(), &model.User{ID: adminUserID, Email: "admin@example.com", Status: "active"})
-	userRepo.CreateWithTenantRole(context.Background(), &model.User{ID: adminUserID}, tenantID, adminRoleID)
 
-	authzService, _ := service.NewAuthorizationService(authzRepo)
-	tenantUserService, _ := service.NewTenantUserService(userRepo, tenantRepo, roleRepo, roleAssignRepo, authzRepo, sessionRepo, authzService)
+	roleAssignRepo.tenantRoles = map[uuid.UUID]map[uuid.UUID]*model.Role{
+		adminUserID: {tenantID: adminRole},
+	}
+	roleAssignRepo.activeTenantAdmins = map[uuid.UUID]int{tenantID: 1}
+	authzRepo.tenantRoles[adminUserID] = map[uuid.UUID]*model.Role{tenantID: adminRole}
 
-	authzRepo.grantTenant(adminUserID, tenantID, "user.assign_role")
+	roleAssignSvc, _ := service.NewRoleAssignmentService(roleAssignRepo, roleRepo, userRepo, tenantRepo, authzRepo)
+	tenantUserService, _ := service.NewTenantUserService(userRepo, tenantRepo, roleRepo, roleAssignSvc, authzRepo)
 
-	h := handler.NewTenantUserHandler(tenantUserService, authzService)
+	authzRepo.grantTenant(adminUserID, tenantID, authorization.PermTenantUserAssignRole)
+
+	h := handler.NewTenantUserHandler(tenantUserService, roleAssignSvc)
 
 	body, _ := json.Marshal(map[string]any{
 		"role_id": memberRoleID.String(),

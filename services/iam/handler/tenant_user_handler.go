@@ -16,16 +16,16 @@ import (
 
 type TenantUserHandler struct {
 	tenantUserService *service.TenantUserService
-	authzService      *service.AuthorizationService
+	roleAssignService *service.RoleAssignmentService
 }
 
 func NewTenantUserHandler(
 	tenantUserService *service.TenantUserService,
-	authzService *service.AuthorizationService,
+	roleAssignService *service.RoleAssignmentService,
 ) *TenantUserHandler {
 	return &TenantUserHandler{
 		tenantUserService: tenantUserService,
-		authzService:      authzService,
+		roleAssignService: roleAssignService,
 	}
 }
 
@@ -68,7 +68,7 @@ func formatMember(m *model.TenantMemberRecord) tenantMemberResponse {
 
 func (h *TenantUserHandler) ProvisionUser(w http.ResponseWriter, r *http.Request) {
 	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok {
+	if !ok || principal == nil || !principal.IsValid() {
 		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
 		return
 	}
@@ -76,19 +76,6 @@ func (h *TenantUserHandler) ProvisionUser(w http.ResponseWriter, r *http.Request
 	tenantID, err := uuid.Parse(r.PathValue("tenantID"))
 	if err != nil {
 		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "Tenant ID must be a valid UUID.")
-		return
-	}
-
-	if err := h.authzService.AuthorizeTenant(r.Context(), principal, tenantID, "user.create"); err != nil {
-		if errors.Is(err, service.ErrUnauthorized) {
-			httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-			return
-		}
-		if errors.Is(err, service.ErrForbidden) {
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You are not authorized to create users in this tenant.")
-			return
-		}
-		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
 		return
 	}
 
@@ -132,6 +119,8 @@ func (h *TenantUserHandler) ProvisionUser(w http.ResponseWriter, r *http.Request
 			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You do not have authority to delegate one or more permissions in this role.")
 		case errors.Is(err, service.ErrUserAlreadyExists):
 			httpx.WriteProblem(w, http.StatusConflict, "User Already Exists", "A user with this email already exists.")
+		case errors.Is(err, service.ErrForbidden):
+			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You do not have permission to provision users.")
 		default:
 			httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
 		}
@@ -142,28 +131,9 @@ func (h *TenantUserHandler) ProvisionUser(w http.ResponseWriter, r *http.Request
 }
 
 func (h *TenantUserHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
-	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok {
-		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-		return
-	}
-
 	tenantID, err := uuid.Parse(r.PathValue("tenantID"))
 	if err != nil {
 		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "Tenant ID must be a valid UUID.")
-		return
-	}
-
-	if err := h.authzService.AuthorizeTenant(r.Context(), principal, tenantID, "user.read"); err != nil {
-		if errors.Is(err, service.ErrUnauthorized) {
-			httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-			return
-		}
-		if errors.Is(err, service.ErrForbidden) {
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You are not authorized to view users in this tenant.")
-			return
-		}
-		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
 		return
 	}
 
@@ -195,12 +165,6 @@ func (h *TenantUserHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *TenantUserHandler) GetUser(w http.ResponseWriter, r *http.Request) {
-	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok {
-		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-		return
-	}
-
 	tenantID, err := uuid.Parse(r.PathValue("tenantID"))
 	if err != nil {
 		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "Tenant ID must be a valid UUID.")
@@ -209,25 +173,6 @@ func (h *TenantUserHandler) GetUser(w http.ResponseWriter, r *http.Request) {
 	userID, err := uuid.Parse(r.PathValue("userID"))
 	if err != nil {
 		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "User ID must be a valid UUID.")
-		return
-	}
-
-	authReq := service.AuthorizationRequest{
-		Action:       "user.read",
-		ResourceType: "user",
-		ResourceID:   userID.String(),
-		TenantID:     tenantID,
-	}
-	if err := h.authzService.Authorize(r.Context(), principal, authReq); err != nil {
-		if errors.Is(err, service.ErrUnauthorized) {
-			httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-			return
-		}
-		if errors.Is(err, service.ErrForbidden) {
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You are not authorized to access this user in this tenant.")
-			return
-		}
-		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
 		return
 	}
 
@@ -244,9 +189,10 @@ func (h *TenantUserHandler) GetUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, formatMember(member))
 }
 
+// AddMember allows platform admins to assign an existing user to any tenant.
 func (h *TenantUserHandler) AddMember(w http.ResponseWriter, r *http.Request) {
 	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok {
+	if !ok || principal == nil || !principal.IsValid() {
 		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
 		return
 	}
@@ -255,20 +201,6 @@ func (h *TenantUserHandler) AddMember(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "Tenant ID must be a valid UUID.")
 		return
-	}
-
-	// Allowed with user.assign_role or role.assign
-	err = h.authzService.AuthorizeTenant(r.Context(), principal, tenantID, "user.assign_role")
-	if err != nil {
-		errRole := h.authzService.AuthorizeTenant(r.Context(), principal, tenantID, "role.assign")
-		if errRole != nil {
-			if errors.Is(err, service.ErrUnauthorized) {
-				httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-				return
-			}
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You are not authorized to assign members to this tenant.")
-			return
-		}
 	}
 
 	var req addMemberRequest
@@ -298,15 +230,17 @@ func (h *TenantUserHandler) AddMember(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, repository.ErrNotFound):
 			httpx.WriteProblem(w, http.StatusNotFound, "User Not Found", "The requested user was not found.")
 		case errors.Is(err, service.ErrInactiveUser):
-			httpx.WriteProblem(w, http.StatusBadRequest, "Inactive User", "Cannot add a deactivated or suspended user.")
+			httpx.WriteProblem(w, http.StatusBadRequest, "Inactive User", "The requested user is deactivated.")
 		case errors.Is(err, service.ErrRoleNotFound):
 			httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Role", "The specified role does not exist.")
 		case errors.Is(err, service.ErrPrivilegeEscalation):
 			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "Platform roles cannot be assigned to tenant users.")
 		case errors.Is(err, service.ErrInvalidRoleForTenant):
 			httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Role", "The specified custom role does not belong to this tenant.")
+		case errors.Is(err, service.ErrCannotDelegateRole):
+			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You do not have authority to delegate this role.")
 		case errors.Is(err, service.ErrForbidden):
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "Only platform administrators can add existing users directly to a tenant.")
+			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "Only platform admins can assign existing users to a tenant.")
 		default:
 			httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
 		}
@@ -316,9 +250,10 @@ func (h *TenantUserHandler) AddMember(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, formatMember(member))
 }
 
+// ChangeRole updates a member's role within a tenant.
 func (h *TenantUserHandler) ChangeRole(w http.ResponseWriter, r *http.Request) {
 	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok {
+	if !ok || principal == nil || !principal.IsValid() {
 		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
 		return
 	}
@@ -331,19 +266,6 @@ func (h *TenantUserHandler) ChangeRole(w http.ResponseWriter, r *http.Request) {
 	userID, err := uuid.Parse(r.PathValue("userID"))
 	if err != nil {
 		httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Request", "User ID must be a valid UUID.")
-		return
-	}
-
-	if err := h.authzService.AuthorizeTenant(r.Context(), principal, tenantID, "user.assign_role"); err != nil {
-		if errors.Is(err, service.ErrUnauthorized) {
-			httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-			return
-		}
-		if errors.Is(err, service.ErrForbidden) {
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You are not authorized to modify member roles in this tenant.")
-			return
-		}
-		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
 		return
 	}
 
@@ -364,8 +286,6 @@ func (h *TenantUserHandler) ChangeRole(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, service.ErrTenantNotFound):
 			httpx.WriteProblem(w, http.StatusNotFound, "Tenant Not Found", "The requested tenant was not found.")
-		case errors.Is(err, service.ErrInactiveTenant):
-			httpx.WriteProblem(w, http.StatusBadRequest, "Inactive Tenant", "The target tenant is deactivated or suspended.")
 		case errors.Is(err, service.ErrMemberNotFound):
 			httpx.WriteProblem(w, http.StatusNotFound, "Member Not Found", "The user is not a member of this tenant.")
 		case errors.Is(err, service.ErrRoleNotFound):
@@ -375,9 +295,11 @@ func (h *TenantUserHandler) ChangeRole(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, service.ErrInvalidRoleForTenant):
 			httpx.WriteProblem(w, http.StatusBadRequest, "Invalid Role", "The specified custom role does not belong to this tenant.")
 		case errors.Is(err, service.ErrCannotDelegateRole):
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You do not have authority to delegate one or more permissions in this role.")
+			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You do not have authority to delegate this role.")
+		case errors.Is(err, service.ErrInactiveUser):
+			httpx.WriteProblem(w, http.StatusBadRequest, "Inactive User", "The target user is inactive.")
 		case errors.Is(err, service.ErrCannotRemoveLastAdmin):
-			httpx.WriteProblem(w, http.StatusConflict, "Conflict", "Cannot demote the last active tenant administrator.")
+			httpx.WriteProblem(w, http.StatusConflict, "Last Tenant Admin", "Cannot remove or demote the last active tenant administrator.")
 		default:
 			httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
 		}
@@ -387,9 +309,10 @@ func (h *TenantUserHandler) ChangeRole(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, formatMember(member))
 }
 
+// RemoveMember removes a user from a tenant.
 func (h *TenantUserHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok {
+	if !ok || principal == nil || !principal.IsValid() {
 		httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
 		return
 	}
@@ -405,26 +328,15 @@ func (h *TenantUserHandler) RemoveMember(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := h.authzService.AuthorizeTenant(r.Context(), principal, tenantID, "user.remove"); err != nil {
-		if errors.Is(err, service.ErrUnauthorized) {
-			httpx.WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "Authentication is required.")
-			return
-		}
-		if errors.Is(err, service.ErrForbidden) {
-			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You are not authorized to remove members from this tenant.")
-			return
-		}
-		httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
-		return
-	}
-
 	err = h.tenantUserService.RemoveTenantMember(r.Context(), principal, tenantID, userID)
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrMemberNotFound):
 			httpx.WriteProblem(w, http.StatusNotFound, "Member Not Found", "The user is not a member of this tenant.")
 		case errors.Is(err, service.ErrCannotRemoveLastAdmin):
-			httpx.WriteProblem(w, http.StatusConflict, "Conflict", "Cannot remove the last active tenant administrator.")
+			httpx.WriteProblem(w, http.StatusConflict, "Last Tenant Admin", "Cannot remove or demote the last active tenant administrator.")
+		case errors.Is(err, service.ErrForbidden):
+			httpx.WriteProblem(w, http.StatusForbidden, "Forbidden", "You do not have permission to remove members from this tenant.")
 		default:
 			httpx.WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "An unexpected error occurred.")
 		}

@@ -24,31 +24,31 @@ var (
 	ErrRoleHasAssignments            = repository.ErrRoleHasAssignments
 )
 
+// RoleService owns role definition lifecycle, custom role scope validation, and permission mappings.
 type RoleService struct {
-	roleRepo       repository.RoleRepository
-	permRepo       repository.PermissionRepository
-	roleAssignRepo repository.RoleAssignmentRepository
-	authzService   *AuthorizationService
-	userRepo       repository.UserRepository
+	roleRepo          repository.RoleRepository
+	permRepo          repository.PermissionRepository
+	roleAssignService *RoleAssignmentService
 }
 
 func NewRoleService(
 	roleRepo repository.RoleRepository,
 	permRepo repository.PermissionRepository,
-	roleAssignRepo repository.RoleAssignmentRepository,
-	authzService *AuthorizationService,
-	userRepo repository.UserRepository,
+	roleAssignService ...*RoleAssignmentService,
 ) (*RoleService, error) {
-	if roleRepo == nil || permRepo == nil || roleAssignRepo == nil || authzService == nil || userRepo == nil {
-		return nil, fmt.Errorf("role service dependencies are required")
+	if roleRepo == nil || permRepo == nil {
+		return nil, fmt.Errorf("role repository and permission repository are required")
+	}
+
+	var ras *RoleAssignmentService
+	if len(roleAssignService) > 0 {
+		ras = roleAssignService[0]
 	}
 
 	return &RoleService{
-		roleRepo:       roleRepo,
-		permRepo:       permRepo,
-		roleAssignRepo: roleAssignRepo,
-		authzService:   authzService,
-		userRepo:       userRepo,
+		roleRepo:          roleRepo,
+		permRepo:          permRepo,
+		roleAssignService: ras,
 	}, nil
 }
 
@@ -84,7 +84,6 @@ func (s *RoleService) GetTenantRole(ctx context.Context, tenantID, roleID uuid.U
 		return role, nil
 	}
 
-	// Role does not belong to this tenant or is a platform role
 	return nil, ErrRoleNotFound
 }
 
@@ -102,7 +101,6 @@ func (s *RoleService) CreateCustomTenantRole(
 		return nil, fmt.Errorf("tenant ID is required")
 	}
 
-	// Validate permissions if any provided against the authoritative database catalog
 	if len(permissionIDs) > 0 {
 		perms, err := s.permRepo.GetByIDs(ctx, permissionIDs)
 		if err != nil {
@@ -147,7 +145,6 @@ func (s *RoleService) UpdateCustomTenantRole(
 		return nil, ErrRoleNotFound
 	}
 
-	// Validate permissions if provided against authoritative database catalog
 	if len(permissionIDs) > 0 {
 		perms, err := s.permRepo.GetByIDs(ctx, permissionIDs)
 		if err != nil {
@@ -201,154 +198,44 @@ func (s *RoleService) DeleteCustomTenantRole(
 	return nil
 }
 
-// AssignPlatformRole allows an authorized platform admin to assign or replace another user's platform role.
+func (s *RoleService) ListPermissions(ctx context.Context) ([]model.Permission, error) {
+	return s.permRepo.ListAll(ctx)
+}
+
+// Assignment delegation methods forwarding to RoleAssignmentService if injected
 func (s *RoleService) AssignPlatformRole(
 	ctx context.Context,
 	actor *identity.Principal,
 	targetUserID uuid.UUID,
 	roleID uuid.UUID,
 ) error {
-
-	if targetUserID == uuid.Nil || roleID == uuid.Nil {
-		return fmt.Errorf("target user ID and role ID are required")
+	if s.roleAssignService != nil {
+		return s.roleAssignService.AssignPlatformRole(ctx, actor, targetUserID, roleID)
 	}
-
-	// 1. Authorize: Actor must be an authorized platform admin
-	if err := s.authzService.AuthorizePlatform(ctx, actor, "role.assign"); err != nil {
-		return err
-	}
-
-	// 2. Invariant: Platform admin must never change or remove their own platform role
-	if actor.UserID == targetUserID {
-		return ErrCannotModifyOwnPlatformRole
-	}
-
-	// 3. Target role must exist and be platform-scoped
-	targetRole, err := s.roleRepo.GetByID(ctx, roleID)
-	if err != nil {
-		if errors.Is(err, repository.ErrNotFound) {
-			return ErrRoleNotFound
-		}
-		return fmt.Errorf("get role: %w", err)
-	}
-	if targetRole.Scope != model.RoleScopePlatform {
-		return ErrInvalidPlatformRole
-	}
-
-	// 4. Target user must exist
-	targetUser, err := s.userRepo.GetByID(ctx, targetUserID)
-	if err != nil {
-		if errors.Is(err, repository.ErrNotFound) {
-			return repository.ErrNotFound
-		}
-		return fmt.Errorf("get target user: %w", err)
-	}
-	if targetUser == nil {
-		return repository.ErrNotFound
-	}
-
-	// 5. If target user currently has PLATFORM_ADMIN and the new role is not PLATFORM_ADMIN,
-	// protect against removing/demoting the last active platform admin
-	currentRole, err := s.roleAssignRepo.GetPlatformRole(ctx, targetUserID)
-	if err != nil && !errors.Is(err, repository.ErrNotFound) {
-		return fmt.Errorf("get current platform role: %w", err)
-	}
-	if err == nil && currentRole != nil && currentRole.Name == "PLATFORM_ADMIN" && targetRole.Name != "PLATFORM_ADMIN" {
-		count, err := s.roleAssignRepo.CountPlatformAdmins(ctx)
-		if err != nil {
-			return fmt.Errorf("count platform admins: %w", err)
-		}
-		if count <= 1 {
-			return ErrCannotRemoveLastPlatformAdmin
-		}
-	}
-
-	if err := s.roleAssignRepo.AssignPlatformRole(ctx, targetUserID, roleID); err != nil {
-		if errors.Is(err, repository.ErrLastPlatformAdmin) {
-			return ErrCannotRemoveLastPlatformAdmin
-		}
-		return err
-	}
-	return nil
+	return errors.New("role assignment service not configured")
 }
 
-// RemovePlatformRole allows an authorized platform admin to remove another user's platform role.
 func (s *RoleService) RemovePlatformRole(
 	ctx context.Context,
 	actor *identity.Principal,
 	targetUserID uuid.UUID,
 ) error {
-
-	if targetUserID == uuid.Nil {
-		return fmt.Errorf("target user ID is required")
+	if s.roleAssignService != nil {
+		return s.roleAssignService.RemovePlatformRole(ctx, actor, targetUserID)
 	}
-
-	// 1. Authorize: Actor must be an authorized platform admin
-	if err := s.authzService.AuthorizePlatform(ctx, actor, "role.assign"); err != nil {
-		return err
-	}
-
-	// 2. Invariant: Platform admin must never remove their own platform role
-	if actor.UserID == targetUserID {
-		return ErrCannotModifyOwnPlatformRole
-	}
-
-	// 3. Inspect target user's current platform role
-	currentRole, err := s.roleAssignRepo.GetPlatformRole(ctx, targetUserID)
-	if err != nil {
-		if errors.Is(err, repository.ErrNotFound) {
-			return repository.ErrNotFound
-		}
-		return fmt.Errorf("get platform role: %w", err)
-	}
-
-	// 4. If target is a PLATFORM_ADMIN, protect the last platform admin
-	if currentRole.Name == "PLATFORM_ADMIN" {
-		count, err := s.roleAssignRepo.CountPlatformAdmins(ctx)
-		if err != nil {
-			return fmt.Errorf("count platform admins: %w", err)
-		}
-		if count <= 1 {
-			return ErrCannotRemoveLastPlatformAdmin
-		}
-	}
-
-	if err := s.roleAssignRepo.RemovePlatformRole(ctx, targetUserID); err != nil {
-		if errors.Is(err, repository.ErrLastPlatformAdmin) {
-			return ErrCannotRemoveLastPlatformAdmin
-		}
-		return err
-	}
-	return nil
+	return errors.New("role assignment service not configured")
 }
 
-func (s *RoleService) ListPermissions(ctx context.Context) ([]model.Permission, error) {
-	return s.permRepo.ListAll(ctx)
+func (s *RoleService) GetPlatformRole(ctx context.Context, targetUserID uuid.UUID) (*model.Role, error) {
+	if s.roleAssignService != nil {
+		return s.roleAssignService.GetPlatformRole(ctx, targetUserID)
+	}
+	return nil, errors.New("role assignment service not configured")
 }
 
 func (s *RoleService) ListUsersByRole(ctx context.Context, tenantID, roleID uuid.UUID) ([]model.TenantMemberRecord, error) {
-	if tenantID == uuid.Nil || roleID == uuid.Nil {
-		return nil, fmt.Errorf("tenant ID and role ID are required")
+	if s.roleAssignService != nil {
+		return s.roleAssignService.ListUsersByRole(ctx, tenantID, roleID)
 	}
-	return s.roleAssignRepo.ListUsersByTenantRole(ctx, tenantID, roleID)
-}
-
-// GetPlatformRole returns a user's current platform role, if any.
-func (s *RoleService) GetPlatformRole(ctx context.Context, targetUserID uuid.UUID) (*model.Role, error) {
-	if targetUserID == uuid.Nil {
-		return nil, fmt.Errorf("target user ID is required")
-	}
-	role, err := s.roleAssignRepo.GetPlatformRole(ctx, targetUserID)
-	if err != nil {
-		if errors.Is(err, repository.ErrNotFound) {
-			return nil, ErrRoleNotFound
-		}
-		return nil, err
-	}
-	perms, err := s.roleRepo.GetRolePermissions(ctx, role.ID)
-	if err != nil {
-		return nil, fmt.Errorf("get role permissions: %w", err)
-	}
-	role.Permissions = perms
-	return role, nil
+	return nil, errors.New("role assignment service not configured")
 }

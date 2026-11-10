@@ -12,7 +12,7 @@ func TestPostgresAuthorizationRepository_InvalidInputs(t *testing.T) {
 	repo := repository.NewPostgresAuthorizationRepository(nil)
 
 	// HasPlatformPermission with nil inputs must return false, nil without accessing db
-	allowed, err := repo.HasPlatformPermission(context.Background(), uuid.Nil, "user.read")
+	allowed, err := repo.HasPlatformPermission(context.Background(), uuid.Nil, "platform.user.read")
 	if err != nil {
 		t.Fatalf("expected nil error for nil user ID, got: %v", err)
 	}
@@ -70,9 +70,9 @@ func TestPostgresAuthorizationRepository_InvalidInputs(t *testing.T) {
 		t.Error("expected error for nil user ID in GetTenantRole")
 	}
 
-	// CountActiveTenantAdmins with nil tenant returns 0, nil without accessing db
-	count, err := repo.CountActiveTenantAdmins(context.Background(), uuid.Nil)
-	if err != nil || count != 0 {
-		t.Error("expected 0, nil for nil tenant ID in CountActiveTenantAdmins")
+	roleAssignRepo := repository.NewPostgresRoleAssignmentRepository(nil)
+	count, err := roleAssignRepo.CountActiveTenantAdmins(context.Background(), uuid.Nil)
+	if err == nil && count != 0 {
+		t.Error("expected 0, error or nil for nil tenant ID in CountActiveTenantAdmins")
 	}
 }

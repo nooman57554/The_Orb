@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/nooman57554/The_Orb/orb_libs/authorization"
 	"github.com/nooman57554/The_Orb/orb_libs/identity"
 	"github.com/nooman57554/The_Orb/services/iam/model"
 	"github.com/nooman57554/The_Orb/services/iam/repository"
@@ -38,7 +39,6 @@ type RoleAssignmentService struct {
 	userRepo       repository.UserRepository
 	tenantRepo     repository.TenantRepository
 	authzRepo      repository.AuthorizationRepository
-	authzService   *AuthorizationService
 }
 
 func NewRoleAssignmentService(
@@ -47,9 +47,8 @@ func NewRoleAssignmentService(
 	userRepo repository.UserRepository,
 	tenantRepo repository.TenantRepository,
 	authzRepo repository.AuthorizationRepository,
-	authzService *AuthorizationService,
 ) (*RoleAssignmentService, error) {
-	if roleAssignRepo == nil || roleRepo == nil || userRepo == nil || tenantRepo == nil || authzRepo == nil || authzService == nil {
+	if roleAssignRepo == nil || roleRepo == nil || userRepo == nil || tenantRepo == nil || authzRepo == nil {
 		return nil, fmt.Errorf("role assignment service dependencies are required")
 	}
 
@@ -59,7 +58,6 @@ func NewRoleAssignmentService(
 		userRepo:       userRepo,
 		tenantRepo:     tenantRepo,
 		authzRepo:      authzRepo,
-		authzService:   authzService,
 	}, nil
 }
 
@@ -78,31 +76,45 @@ func (s *RoleAssignmentService) AssignRole(
 
 	switch req.Scope {
 	case AssignmentScopePlatform:
-		return s.assignPlatformRole(ctx, actor, req)
+		return s.AssignPlatformRole(ctx, actor, req.UserID, req.RoleID)
 	case AssignmentScopeTenant:
-		return s.assignTenantRole(ctx, actor, req)
+		return s.AssignTenantRole(ctx, actor, req.TenantID, req.UserID, req.RoleID)
 	default:
 		return fmt.Errorf("invalid assignment scope: %q", req.Scope)
 	}
 }
 
-func (s *RoleAssignmentService) assignPlatformRole(
+// AssignPlatformRole assigns or replaces another user's platform role.
+// Only an authorized platform admin may assign platform roles.
+// Self-demotion is prevented: a platform admin cannot modify their own platform role.
+func (s *RoleAssignmentService) AssignPlatformRole(
 	ctx context.Context,
 	actor *identity.Principal,
-	req AssignRoleRequest,
+	targetUserID, roleID uuid.UUID,
 ) error {
-	// Invariant: A platform admin may not change or remove their own platform role
-	if actor.UserID == req.UserID {
+	if actor == nil || !actor.IsValid() {
+		return ErrUnauthorized
+	}
+	if targetUserID == uuid.Nil || roleID == uuid.Nil {
+		return fmt.Errorf("target user ID and role ID are required")
+	}
+
+	// Invariant: Platform admin cannot modify their own platform role
+	if actor.UserID == targetUserID {
 		return ErrCannotModifyOwnPlatformRole
 	}
 
-	// Authorize: Only an authorized platform admin may manage other users' platform roles
-	if err := s.authzService.AuthorizePlatform(ctx, actor, "role.assign"); err != nil {
-		return err
+	// Authorize actor: must hold platform.role.assign
+	isPlatformAdmin, err := s.isPlatformAdmin(ctx, actor.UserID)
+	if err != nil {
+		return fmt.Errorf("check platform admin authority: %w", err)
+	}
+	if !isPlatformAdmin {
+		return ErrForbidden
 	}
 
-	// Target role must exist and be platform-scoped
-	targetRole, err := s.roleRepo.GetByID(ctx, req.RoleID)
+	// Validate target role exists and has platform scope
+	targetRole, err := s.roleRepo.GetByID(ctx, roleID)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return ErrRoleNotFound
@@ -113,8 +125,8 @@ func (s *RoleAssignmentService) assignPlatformRole(
 		return ErrInvalidPlatformRole
 	}
 
-	// Target user must exist and be active
-	targetUser, err := s.userRepo.GetByID(ctx, req.UserID)
+	// Validate target user exists and is active
+	targetUser, err := s.userRepo.GetByID(ctx, targetUserID)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return repository.ErrNotFound
@@ -128,11 +140,8 @@ func (s *RoleAssignmentService) assignPlatformRole(
 		return ErrInactiveUser
 	}
 
-	// Last-platform-admin check and assignment
-	currentRole, err := s.roleAssignRepo.GetPlatformRole(ctx, req.UserID)
-	if err != nil && !errors.Is(err, repository.ErrNotFound) {
-		return fmt.Errorf("get current platform role: %w", err)
-	}
+	// Service-level check for last admin invariant (persistence layer also enforces transactionally)
+	currentRole, err := s.roleAssignRepo.GetPlatformRole(ctx, targetUserID)
 	if err == nil && currentRole != nil && currentRole.Name == "PLATFORM_ADMIN" && targetRole.Name != "PLATFORM_ADMIN" {
 		count, err := s.roleAssignRepo.CountPlatformAdmins(ctx)
 		if err != nil {
@@ -143,7 +152,7 @@ func (s *RoleAssignmentService) assignPlatformRole(
 		}
 	}
 
-	if err := s.roleAssignRepo.AssignPlatformRole(ctx, req.UserID, req.RoleID); err != nil {
+	if err := s.roleAssignRepo.AssignPlatformRole(ctx, targetUserID, roleID); err != nil {
 		if errors.Is(err, repository.ErrLastPlatformAdmin) {
 			return ErrCannotRemoveLastPlatformAdmin
 		}
@@ -153,17 +162,80 @@ func (s *RoleAssignmentService) assignPlatformRole(
 	return nil
 }
 
-func (s *RoleAssignmentService) assignTenantRole(
+// RemovePlatformRole removes another user's platform role.
+// Self-demotion is prevented: a platform admin cannot remove their own platform role.
+func (s *RoleAssignmentService) RemovePlatformRole(
 	ctx context.Context,
 	actor *identity.Principal,
-	req AssignRoleRequest,
+	targetUserID uuid.UUID,
 ) error {
-	if req.TenantID == uuid.Nil {
-		return fmt.Errorf("tenant ID is required for tenant scope")
+	if actor == nil || !actor.IsValid() {
+		return ErrUnauthorized
+	}
+	if targetUserID == uuid.Nil {
+		return fmt.Errorf("target user ID is required")
 	}
 
-	// Target tenant must exist and be active
-	tenant, err := s.tenantRepo.GetByID(ctx, req.TenantID)
+	// Invariant: Platform admin cannot remove their own platform role
+	if actor.UserID == targetUserID {
+		return ErrCannotModifyOwnPlatformRole
+	}
+
+	// Authorize actor: must hold platform.role.assign
+	isPlatformAdmin, err := s.isPlatformAdmin(ctx, actor.UserID)
+	if err != nil {
+		return fmt.Errorf("check platform admin authority: %w", err)
+	}
+	if !isPlatformAdmin {
+		return ErrForbidden
+	}
+
+	currentRole, err := s.roleAssignRepo.GetPlatformRole(ctx, targetUserID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return repository.ErrNotFound
+		}
+		return fmt.Errorf("get platform role: %w", err)
+	}
+
+	if currentRole.Name == "PLATFORM_ADMIN" {
+		count, err := s.roleAssignRepo.CountPlatformAdmins(ctx)
+		if err != nil {
+			return fmt.Errorf("count platform admins: %w", err)
+		}
+		if count <= 1 {
+			return ErrCannotRemoveLastPlatformAdmin
+		}
+	}
+
+	if err := s.roleAssignRepo.RemovePlatformRole(ctx, targetUserID); err != nil {
+		if errors.Is(err, repository.ErrLastPlatformAdmin) {
+			return ErrCannotRemoveLastPlatformAdmin
+		}
+		return err
+	}
+
+	return nil
+}
+
+// AssignTenantRole assigns or replaces a user's role in a tenant.
+// Authoritative rules:
+// - A platform admin can assign themselves or any other user (including another platform admin) to any existing tenant.
+// - A tenant admin can only assign roles in their own tenant, subject to delegation rules.
+func (s *RoleAssignmentService) AssignTenantRole(
+	ctx context.Context,
+	actor *identity.Principal,
+	tenantID, targetUserID, roleID uuid.UUID,
+) error {
+	if actor == nil || !actor.IsValid() {
+		return ErrUnauthorized
+	}
+	if tenantID == uuid.Nil || targetUserID == uuid.Nil || roleID == uuid.Nil {
+		return fmt.Errorf("tenant ID, target user ID, and role ID are required")
+	}
+
+	// 1. Verify tenant exists and is active
+	tenant, err := s.tenantRepo.GetByID(ctx, tenantID)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return ErrTenantNotFound
@@ -174,8 +246,8 @@ func (s *RoleAssignmentService) assignTenantRole(
 		return ErrInactiveTenant
 	}
 
-	// Target user must exist and be active
-	targetUser, err := s.userRepo.GetByID(ctx, req.UserID)
+	// 2. Verify target user exists and is active
+	targetUser, err := s.userRepo.GetByID(ctx, targetUserID)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return repository.ErrNotFound
@@ -189,8 +261,8 @@ func (s *RoleAssignmentService) assignTenantRole(
 		return ErrInactiveUser
 	}
 
-	// Target role validation
-	targetRole, err := s.roleRepo.GetByID(ctx, req.RoleID)
+	// 3. Verify target role exists, is not platform-scoped, and custom role belongs to this tenant
+	targetRole, err := s.roleRepo.GetByID(ctx, roleID)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return ErrRoleNotFound
@@ -198,51 +270,41 @@ func (s *RoleAssignmentService) assignTenantRole(
 		return fmt.Errorf("get role: %w", err)
 	}
 	if targetRole.Scope == model.RoleScopePlatform {
-		return ErrInvalidPermissionScope
+		return ErrPrivilegeEscalation
 	}
 	if targetRole.Scope == model.RoleScopeCustomTenant {
-		if targetRole.TenantID == nil || *targetRole.TenantID != req.TenantID {
-			return ErrRoleNotFound
+		if targetRole.TenantID == nil || *targetRole.TenantID != tenantID {
+			return ErrInvalidRoleForTenant
 		}
 	}
 
-	// Authorize actor: platform admins have authority; tenant admins need user.assign_role and must satisfy delegation authority
-	isPlatformAdmin, err := s.authzRepo.HasPlatformPermission(ctx, actor.UserID, "role.assign")
+	// 4. Authorize Actor
+	isPlatformAdmin, err := s.isPlatformAdmin(ctx, actor.UserID)
 	if err != nil {
 		return fmt.Errorf("check platform admin status: %w", err)
 	}
 
 	if !isPlatformAdmin {
-		if err := s.authzService.AuthorizeTenant(ctx, actor, req.TenantID, "user.assign_role"); err != nil {
-			return err
+		// Tenant admins: must have tenant.user.assign_role in this tenant
+		hasPerm, err := s.authzRepo.HasTenantPermission(ctx, actor.UserID, tenantID, authorization.PermTenantUserAssignRole)
+		if err != nil {
+			return fmt.Errorf("check tenant permission: %w", err)
 		}
-		if err := s.checkDelegationAuthority(ctx, actor, req.TenantID, targetRole); err != nil {
+		if !hasPerm {
+			return ErrForbidden
+		}
+
+		// Enforce delegation rule: target role permissions must be a subset of actor's permissions
+		if err := s.checkDelegationAuthority(ctx, actor, tenantID, targetRole); err != nil {
 			return err
 		}
 	}
 
-	// Check last active tenant admin protection
-	currentRole, err := s.authzRepo.GetTenantRole(ctx, req.UserID, req.TenantID)
-	if err != nil && !errors.Is(err, repository.ErrNotFound) {
-		return fmt.Errorf("get current tenant role: %w", err)
-	}
+	// 5. Check last active tenant admin protection (precheck, repository enforces transactionally)
+	currentRole, err := s.roleAssignRepo.GetTenantRole(ctx, targetUserID, tenantID)
 	if err == nil && currentRole != nil {
-		if len(currentRole.Permissions) == 0 && currentRole.ID != uuid.Nil {
-			perms, pErr := s.roleRepo.GetRolePermissions(ctx, currentRole.ID)
-			if pErr != nil {
-				return fmt.Errorf("get role permissions: %w", pErr)
-			}
-			currentRole.Permissions = perms
-		}
-		if len(targetRole.Permissions) == 0 && targetRole.ID != uuid.Nil {
-			perms, pErr := s.roleRepo.GetRolePermissions(ctx, targetRole.ID)
-			if pErr != nil {
-				return fmt.Errorf("get role permissions: %w", pErr)
-			}
-			targetRole.Permissions = perms
-		}
-		if s.isRoleAdmin(currentRole) && !s.isRoleAdmin(targetRole) {
-			adminCount, cErr := s.authzRepo.CountActiveTenantAdmins(ctx, req.TenantID)
+		if currentRole.Name == "TENANT_ADMIN_RW" && targetRole.Name != "TENANT_ADMIN_RW" {
+			adminCount, cErr := s.roleAssignRepo.CountActiveTenantAdmins(ctx, tenantID)
 			if cErr != nil {
 				return fmt.Errorf("check admin count: %w", cErr)
 			}
@@ -252,11 +314,71 @@ func (s *RoleAssignmentService) assignTenantRole(
 		}
 	}
 
-	if err := s.roleAssignRepo.AssignTenantRole(ctx, req.UserID, req.TenantID, req.RoleID); err != nil {
+	if err := s.roleAssignRepo.AssignTenantRole(ctx, targetUserID, tenantID, roleID); err != nil {
 		if errors.Is(err, repository.ErrLastTenantAdmin) {
 			return ErrCannotRemoveLastAdmin
 		}
 		return err
+	}
+
+	return nil
+}
+
+// RemoveTenantRole removes a user's membership from a tenant.
+func (s *RoleAssignmentService) RemoveTenantRole(
+	ctx context.Context,
+	actor *identity.Principal,
+	tenantID, targetUserID uuid.UUID,
+) error {
+	if actor == nil || !actor.IsValid() {
+		return ErrUnauthorized
+	}
+	if tenantID == uuid.Nil || targetUserID == uuid.Nil {
+		return fmt.Errorf("tenant ID and user ID are required")
+	}
+
+	// Authorize actor: platform admins or tenant admins with tenant.user.remove
+	isPlatformAdmin, err := s.isPlatformAdmin(ctx, actor.UserID)
+	if err != nil {
+		return fmt.Errorf("check platform admin status: %w", err)
+	}
+
+	if !isPlatformAdmin {
+		hasPerm, err := s.authzRepo.HasTenantPermission(ctx, actor.UserID, tenantID, authorization.PermTenantUserRemove)
+		if err != nil {
+			return fmt.Errorf("check tenant permission: %w", err)
+		}
+		if !hasPerm {
+			return ErrForbidden
+		}
+	}
+
+	currentRole, err := s.roleAssignRepo.GetTenantRole(ctx, targetUserID, tenantID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return ErrMemberNotFound
+		}
+		return fmt.Errorf("get current role: %w", err)
+	}
+
+	if currentRole.Name == "TENANT_ADMIN_RW" {
+		adminCount, err := s.roleAssignRepo.CountActiveTenantAdmins(ctx, tenantID)
+		if err != nil {
+			return fmt.Errorf("check admin count: %w", err)
+		}
+		if adminCount <= 1 {
+			return ErrCannotRemoveLastAdmin
+		}
+	}
+
+	if err := s.roleAssignRepo.RemoveTenantRole(ctx, targetUserID, tenantID); err != nil {
+		if errors.Is(err, repository.ErrLastTenantAdmin) {
+			return ErrCannotRemoveLastAdmin
+		}
+		if errors.Is(err, repository.ErrNotFound) {
+			return ErrMemberNotFound
+		}
+		return fmt.Errorf("remove member: %w", err)
 	}
 
 	return nil
@@ -277,117 +399,12 @@ func (s *RoleAssignmentService) RemoveRole(
 
 	switch req.Scope {
 	case AssignmentScopePlatform:
-		return s.removePlatformRole(ctx, actor, req)
+		return s.RemovePlatformRole(ctx, actor, req.UserID)
 	case AssignmentScopeTenant:
-		return s.removeTenantRole(ctx, actor, req)
+		return s.RemoveTenantRole(ctx, actor, req.TenantID, req.UserID)
 	default:
 		return fmt.Errorf("invalid assignment scope: %q", req.Scope)
 	}
-}
-
-func (s *RoleAssignmentService) removePlatformRole(
-	ctx context.Context,
-	actor *identity.Principal,
-	req RemoveRoleRequest,
-) error {
-	// Invariant: Platform admin must never remove their own platform role
-	if actor.UserID == req.UserID {
-		return ErrCannotModifyOwnPlatformRole
-	}
-
-	// Authorize actor
-	if err := s.authzService.AuthorizePlatform(ctx, actor, "role.assign"); err != nil {
-		return err
-	}
-
-	// Inspect target user's current platform role
-	currentRole, err := s.roleAssignRepo.GetPlatformRole(ctx, req.UserID)
-	if err != nil {
-		if errors.Is(err, repository.ErrNotFound) {
-			return repository.ErrNotFound
-		}
-		return fmt.Errorf("get platform role: %w", err)
-	}
-
-	// Last platform admin protection
-	if currentRole.Name == "PLATFORM_ADMIN" {
-		count, err := s.roleAssignRepo.CountPlatformAdmins(ctx)
-		if err != nil {
-			return fmt.Errorf("count platform admins: %w", err)
-		}
-		if count <= 1 {
-			return ErrCannotRemoveLastPlatformAdmin
-		}
-	}
-
-	if err := s.roleAssignRepo.RemovePlatformRole(ctx, req.UserID); err != nil {
-		if errors.Is(err, repository.ErrLastPlatformAdmin) {
-			return ErrCannotRemoveLastPlatformAdmin
-		}
-		return err
-	}
-
-	return nil
-}
-
-func (s *RoleAssignmentService) removeTenantRole(
-	ctx context.Context,
-	actor *identity.Principal,
-	req RemoveRoleRequest,
-) error {
-	if req.TenantID == uuid.Nil {
-		return fmt.Errorf("tenant ID is required for tenant scope")
-	}
-
-	// Authorize actor: platform admins or tenant admins with user.delete
-	isPlatformAdmin, err := s.authzRepo.HasPlatformPermission(ctx, actor.UserID, "role.assign")
-	if err != nil {
-		return fmt.Errorf("check platform admin status: %w", err)
-	}
-	if !isPlatformAdmin {
-		if err := s.authzService.AuthorizeTenant(ctx, actor, req.TenantID, "user.delete"); err != nil {
-			return err
-		}
-	}
-
-	// Inspect target user's current tenant role
-	currentRole, err := s.authzRepo.GetTenantRole(ctx, req.UserID, req.TenantID)
-	if err != nil {
-		if errors.Is(err, repository.ErrNotFound) {
-			return ErrMemberNotFound
-		}
-		return fmt.Errorf("get current role: %w", err)
-	}
-
-	if len(currentRole.Permissions) == 0 && currentRole.ID != uuid.Nil {
-		perms, err := s.roleRepo.GetRolePermissions(ctx, currentRole.ID)
-		if err != nil {
-			return fmt.Errorf("get role permissions: %w", err)
-		}
-		currentRole.Permissions = perms
-	}
-
-	if s.isRoleAdmin(currentRole) {
-		adminCount, err := s.authzRepo.CountActiveTenantAdmins(ctx, req.TenantID)
-		if err != nil {
-			return fmt.Errorf("check admin count: %w", err)
-		}
-		if adminCount <= 1 {
-			return ErrCannotRemoveLastAdmin
-		}
-	}
-
-	if err := s.roleAssignRepo.RemoveTenantRole(ctx, req.UserID, req.TenantID); err != nil {
-		if errors.Is(err, repository.ErrLastTenantAdmin) {
-			return ErrCannotRemoveLastAdmin
-		}
-		if errors.Is(err, repository.ErrNotFound) {
-			return ErrMemberNotFound
-		}
-		return fmt.Errorf("remove member: %w", err)
-	}
-
-	return nil
 }
 
 // GetPlatformRole returns a user's current platform role, if any.
@@ -410,7 +427,7 @@ func (s *RoleAssignmentService) GetTenantRole(ctx context.Context, userID, tenan
 	if userID == uuid.Nil || tenantID == uuid.Nil {
 		return nil, fmt.Errorf("user ID and tenant ID are required")
 	}
-	role, err := s.authzRepo.GetTenantRole(ctx, userID, tenantID)
+	role, err := s.roleAssignRepo.GetTenantRole(ctx, userID, tenantID)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return nil, ErrMemberNotFound
@@ -428,21 +445,17 @@ func (s *RoleAssignmentService) ListUsersByRole(ctx context.Context, tenantID, r
 	return s.roleAssignRepo.ListUsersByTenantRole(ctx, tenantID, roleID)
 }
 
+func (s *RoleAssignmentService) isPlatformAdmin(ctx context.Context, userID uuid.UUID) (bool, error) {
+	return s.authzRepo.HasPlatformPermission(ctx, userID, authorization.PermPlatformRoleAssign)
+}
+
 func (s *RoleAssignmentService) checkDelegationAuthority(
 	ctx context.Context,
 	actor *identity.Principal,
 	tenantID uuid.UUID,
 	targetRole *model.Role,
 ) error {
-	isPlatformAdmin, err := s.authzRepo.HasPlatformPermission(ctx, actor.UserID, "role.assign")
-	if err != nil {
-		return fmt.Errorf("check platform delegation permission: %w", err)
-	}
-	if isPlatformAdmin {
-		return nil
-	}
-
-	actorRole, err := s.authzRepo.GetTenantRole(ctx, actor.UserID, tenantID)
+	actorRole, err := s.roleAssignRepo.GetTenantRole(ctx, actor.UserID, tenantID)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return ErrForbidden
@@ -450,26 +463,14 @@ func (s *RoleAssignmentService) checkDelegationAuthority(
 		return fmt.Errorf("get actor tenant role: %w", err)
 	}
 
-	var actorPerms []model.Permission
-	if len(actorRole.Permissions) > 0 {
-		actorPerms = actorRole.Permissions
-	} else if actorRole.ID != uuid.Nil {
-		perms, err := s.roleRepo.GetRolePermissions(ctx, actorRole.ID)
-		if err != nil {
-			return fmt.Errorf("get actor role permissions: %w", err)
-		}
-		actorPerms = perms
+	actorPerms, err := s.roleRepo.GetRolePermissions(ctx, actorRole.ID)
+	if err != nil {
+		return fmt.Errorf("get actor role permissions: %w", err)
 	}
 
-	var targetPerms []model.Permission
-	if len(targetRole.Permissions) > 0 {
-		targetPerms = targetRole.Permissions
-	} else if targetRole.ID != uuid.Nil {
-		perms, err := s.roleRepo.GetRolePermissions(ctx, targetRole.ID)
-		if err != nil {
-			return fmt.Errorf("get target role permissions: %w", err)
-		}
-		targetPerms = perms
+	targetPerms, err := s.roleRepo.GetRolePermissions(ctx, targetRole.ID)
+	if err != nil {
+		return fmt.Errorf("get target role permissions: %w", err)
 	}
 
 	actorPermMap := make(map[string]struct{}, len(actorPerms))
@@ -484,19 +485,4 @@ func (s *RoleAssignmentService) checkDelegationAuthority(
 	}
 
 	return nil
-}
-
-func (s *RoleAssignmentService) isRoleAdmin(role *model.Role) bool {
-	if role == nil {
-		return false
-	}
-	if role.Name == "TENANT_ADMIN_RW" || role.Name == "PLATFORM_ADMIN" {
-		return true
-	}
-	for _, p := range role.Permissions {
-		if p.Name == "user.assign_role" || p.Name == "role.assign" {
-			return true
-		}
-	}
-	return false
 }

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/nooman57554/The_Orb/orb_libs/authorization"
 	"github.com/nooman57554/The_Orb/orb_libs/httpx"
 	"github.com/nooman57554/The_Orb/orb_libs/identity"
 	"github.com/nooman57554/The_Orb/services/iam/service"
@@ -33,9 +34,11 @@ type checkAuthorizationResponse struct {
 	Reason  string `json:"reason,omitempty"`
 }
 
+// Check evaluates an authorization check request against the canonical authorization policy.
+// This endpoint is authenticated and allows callers to verify authorization decisions.
 func (h *AuthorizationHandler) Check(w http.ResponseWriter, r *http.Request) {
 	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok {
+	if !ok || principal == nil || !principal.IsValid() {
 		httpx.WriteProblem(
 			w,
 			http.StatusUnauthorized,
@@ -67,11 +70,10 @@ func (h *AuthorizationHandler) Check(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var tenantID uuid.UUID
+	var tenantIDStr string
 	if strings.TrimSpace(req.TenantID) != "" {
-		var err error
-		tenantID, err = uuid.Parse(strings.TrimSpace(req.TenantID))
-		if err != nil {
+		tenantID, err := uuid.Parse(strings.TrimSpace(req.TenantID))
+		if err != nil || tenantID == uuid.Nil {
 			httpx.WriteProblem(
 				w,
 				http.StatusBadRequest,
@@ -80,31 +82,26 @@ func (h *AuthorizationHandler) Check(w http.ResponseWriter, r *http.Request) {
 			)
 			return
 		}
+		tenantIDStr = tenantID.String()
 	}
 
-	authReq := service.AuthorizationRequest{
-		Action:       action,
+	authReq := authorization.AuthorizationRequest{
+		Principal:    principal,
+		Permission:   action,
 		ResourceType: strings.TrimSpace(req.ResourceType),
 		ResourceID:   strings.TrimSpace(req.ResourceID),
-		TenantID:     tenantID,
+		TenantID:     tenantIDStr,
 	}
 
-	err := h.authzService.Authorize(r.Context(), principal, authReq)
+	decision, err := h.authzService.Authorize(r.Context(), authReq)
 	if err != nil {
-		if errors.Is(err, service.ErrUnauthorized) {
+		if errors.Is(err, authorization.ErrPolicyUnavailable) || errors.Is(err, authorization.ErrPolicyStale) {
 			httpx.WriteProblem(
 				w,
-				http.StatusUnauthorized,
-				"Unauthorized",
-				"Authentication is required.",
+				http.StatusServiceUnavailable,
+				"Service Unavailable",
+				"Authorization policy is temporarily unavailable.",
 			)
-			return
-		}
-		if errors.Is(err, service.ErrForbidden) {
-			writeJSON(w, http.StatusOK, checkAuthorizationResponse{
-				Allowed: false,
-				Reason:  "insufficient permissions",
-			})
 			return
 		}
 
@@ -117,7 +114,16 @@ func (h *AuthorizationHandler) Check(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !decision.Allowed {
+		writeJSON(w, http.StatusOK, checkAuthorizationResponse{
+			Allowed: false,
+			Reason:  string(decision.Reason),
+		})
+		return
+	}
+
 	writeJSON(w, http.StatusOK, checkAuthorizationResponse{
 		Allowed: true,
+		Reason:  string(decision.Reason),
 	})
 }

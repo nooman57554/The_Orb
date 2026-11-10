@@ -5,126 +5,185 @@ INSERT INTO permissions (
     description
 )
 VALUES
+-- ============================================================
+-- PLATFORM PERMISSIONS (scope: platform)
+-- ============================================================
 (
-    '01a0f2c7-fc19-7839-b482-79363f85a781',
-    'tenant.read',
-    'tenant',
-    'Read tenant information'
+    '01a0f2c7-fc19-7920-b482-79363f85a720',
+    'platform.tenant.list',
+    'platform',
+    'List all tenants across platform'
 ),
 (
-    '01a0f2c7-fc19-74d3-b5eb-416d05f0b200',
-    'tenant.update',
-    'tenant',
-    'Update tenant information'
+    '01a0f2c7-fc19-7921-b482-79363f85a721',
+    'platform.tenant.read',
+    'platform',
+    'Read any tenant details'
 ),
 (
-    '01a0f2c7-fc19-7906-b482-79363f85a706',
-    'tenant.create',
+    '01a0f2c7-fc19-7922-b482-79363f85a722',
+    'platform.tenant.create',
     'platform',
     'Create new tenants'
 ),
 (
-    '01a0f2c7-fc19-7907-b482-79363f85a707',
-    'tenant.deactivate',
+    '01a0f2c7-fc19-7923-b482-79363f85a723',
+    'platform.tenant.update',
+    'platform',
+    'Update tenant settings across platform'
+),
+(
+    '01a0f2c7-fc19-7924-b482-79363f85a724',
+    'platform.tenant.deactivate',
     'platform',
     'Deactivate or suspend tenants'
 ),
 (
-    '01a0f2c7-fc19-7908-b482-79363f85a708',
-    'tenant.reactivate',
+    '01a0f2c7-fc19-7925-b482-79363f85a725',
+    'platform.tenant.reactivate',
     'platform',
     'Reactivate tenants'
 ),
 (
-    '01a0f2c7-fc19-711f-adff-78e9a83a0791',
-    'user.read',
-    'tenant',
-    'Read users within a tenant'
-),
-(
-    '01a0f2c7-fc19-7901-b482-79363f85a701',
-    'user.create',
-    'tenant',
-    'Provision new users'
-),
-(
-    '01a0f2c7-fc19-7902-b482-79363f85a702',
-    'user.update',
-    'tenant',
-    'Update user profile fields'
-),
-(
-    '01a0f2c7-fc19-7903-b482-79363f85a703',
-    'user.deactivate',
+    '01a0f2c7-fc19-7926-b482-79363f85a726',
+    'platform.user.read',
     'platform',
-    'Deactivate or suspend user accounts'
+    'Read any user across platform'
 ),
 (
-    '01a0f2c7-fc19-7904-b482-79363f85a704',
-    'user.reactivate',
+    '01a0f2c7-fc19-7927-b482-79363f85a727',
+    'platform.user.deactivate',
+    'platform',
+    'Deactivate user accounts'
+),
+(
+    '01a0f2c7-fc19-7928-b482-79363f85a728',
+    'platform.user.reactivate',
     'platform',
     'Reactivate user accounts'
 ),
 (
-    '01a0f2c7-fc19-7ea2-a294-1bf965a603f5',
-    'user.invite',
-    'tenant',
-    'Invite users to a tenant'
+    '01a0f2c7-fc19-7929-b482-79363f85a729',
+    'platform.role.read',
+    'platform',
+    'Read platform roles'
 ),
 (
-    '01a0f2c7-fc19-7db4-8293-e76cee3eecd3',
-    'user.remove',
+    '01a0f2c7-fc19-7930-b482-79363f85a730',
+    'platform.role.create',
+    'platform',
+    'Create platform roles'
+),
+(
+    '01a0f2c7-fc19-7931-b482-79363f85a731',
+    'platform.role.update',
+    'platform',
+    'Update platform roles'
+),
+(
+    '01a0f2c7-fc19-7932-b482-79363f85a732',
+    'platform.role.delete',
+    'platform',
+    'Delete platform roles'
+),
+(
+    '01a0f2c7-fc19-7933-b482-79363f85a733',
+    'platform.role.assign',
+    'platform',
+    'Assign platform roles or assign users across tenants'
+),
+(
+    '01a0f2c7-fc19-7934-b482-79363f85a734',
+    'platform.role.assign_permissions',
+    'platform',
+    'Assign permissions to platform roles'
+),
+
+-- ============================================================
+-- CANONICAL TENANT PERMISSIONS (scope: tenant)
+-- ============================================================
+(
+    '01a0f2c7-fc19-7940-b482-79363f85a740',
+    'tenant.read',
+    'tenant',
+    'Read tenant details'
+),
+(
+    '01a0f2c7-fc19-7941-b482-79363f85a741',
+    'tenant.update',
+    'tenant',
+    'Update tenant details'
+),
+(
+    '01a0f2c7-fc19-7942-b482-79363f85a742',
+    'tenant.user.read',
+    'tenant',
+    'Read users within a tenant'
+),
+(
+    '01a0f2c7-fc19-7943-b482-79363f85a743',
+    'tenant.user.create',
+    'tenant',
+    'Provision new users in a tenant'
+),
+(
+    '01a0f2c7-fc19-7944-b482-79363f85a744',
+    'tenant.user.update',
+    'tenant',
+    'Update tenant users'
+),
+(
+    '01a0f2c7-fc19-7945-b482-79363f85a745',
+    'tenant.user.assign_role',
+    'tenant',
+    'Assign roles to users in a tenant'
+),
+(
+    '01a0f2c7-fc19-7946-b482-79363f85a746',
+    'tenant.user.remove',
     'tenant',
     'Remove users from a tenant'
 ),
 (
-    '01a0f2c7-fc19-7905-b482-79363f85a705',
-    'user.assign_role',
+    '01a0f2c7-fc19-7947-b482-79363f85a747',
+    'tenant.role.read',
     'tenant',
-    'Assign or change a user''s role in a tenant'
+    'Read tenant roles'
 ),
 (
-    '01a0f2c7-fc19-7909-b482-79363f85a709',
-    'role.read',
+    '01a0f2c7-fc19-7948-b482-79363f85a748',
+    'tenant.role.create',
     'tenant',
-    'Read roles and their assigned permissions'
+    'Create custom tenant roles'
 ),
 (
-    '01a0f2c7-fc19-7910-b482-79363f85a710',
-    'role.create',
+    '01a0f2c7-fc19-7949-b482-79363f85a749',
+    'tenant.role.update',
     'tenant',
-    'Create custom roles'
+    'Update custom tenant roles'
 ),
 (
-    '01a0f2c7-fc19-7911-b482-79363f85a711',
-    'role.update',
+    '01a0f2c7-fc19-7950-b482-79363f85a750',
+    'tenant.role.delete',
     'tenant',
-    'Update roles and their permission assignments'
+    'Delete custom tenant roles'
 ),
 (
-    '01a0f2c7-fc19-7912-b482-79363f85a712',
-    'role.delete',
+    '01a0f2c7-fc19-7951-b482-79363f85a751',
+    'tenant.role.assign_permissions',
     'tenant',
-    'Delete custom roles'
+    'Assign permissions to custom tenant roles'
 ),
 (
-    '01a0f2c7-fc19-7913-b482-79363f85a713',
-    'role.assign_permissions',
-    'tenant',
-    'Assign permissions to custom roles'
-),
-(
-    '01a0f2c7-fc19-7914-b482-79363f85a714',
-    'role.assign',
-    'tenant',
-    'Assign roles to users'
-),
-(
-    '01a0f2c7-fc19-7915-b482-79363f85a715',
+    '01a0f2c7-fc19-7952-b482-79363f85a752',
     'permission.read',
     'tenant',
-    'Read the permission catalog'
+    'Read permission catalog'
 ),
+
+-- ============================================================
+-- AGENT & WORKFLOW PERMISSIONS (scope: tenant)
+-- ============================================================
 (
     '01a0f2c7-fc19-7ad0-91f3-e542afb3927d',
     'agent.read',
@@ -179,4 +238,6 @@ VALUES
     'tenant',
     'Execute workflows'
 )
-ON CONFLICT (name) DO NOTHING;
+ON CONFLICT (name) DO UPDATE SET
+    scope = EXCLUDED.scope,
+    description = EXCLUDED.description;
