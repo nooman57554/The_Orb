@@ -231,6 +231,25 @@ func (e *LocalEngine) authorizeTenant(
 	}
 	tenantIDStr := tenantUUID.String()
 
+	// Tenant active status check (fail-closed if tenant inactive or missing from populated catalog)
+	if tenantPolicy, exists := snapshot.Tenants[tenantIDStr]; exists {
+		if !tenantPolicy.Active {
+			return Decision{
+				Allowed:       false,
+				Reason:        ReasonTenantInactive,
+				PolicyVersion: snapshot.Version,
+				EvaluatedAt:   now,
+			}, nil
+		}
+	} else if len(snapshot.Tenants) > 0 {
+		return Decision{
+			Allowed:       false,
+			Reason:        ReasonTenantInactive,
+			PolicyVersion: snapshot.Version,
+			EvaluatedAt:   now,
+		}, nil
+	}
+
 	// Tenant assignment lookup
 	userTenantRoles, hasTenantMap := snapshot.TenantAssignments[userIDStr]
 	if !hasTenantMap {

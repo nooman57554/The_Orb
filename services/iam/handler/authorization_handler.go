@@ -9,16 +9,15 @@ import (
 	"github.com/nooman57554/The_Orb/orb_libs/authorization"
 	"github.com/nooman57554/The_Orb/orb_libs/httpx"
 	"github.com/nooman57554/The_Orb/orb_libs/identity"
-	"github.com/nooman57554/The_Orb/services/iam/service"
 )
 
 type AuthorizationHandler struct {
-	authzService *service.AuthorizationService
+	authzEngine authorization.Engine
 }
 
-func NewAuthorizationHandler(authzService *service.AuthorizationService) *AuthorizationHandler {
+func NewAuthorizationHandler(authzEngine authorization.Engine) *AuthorizationHandler {
 	return &AuthorizationHandler{
-		authzService: authzService,
+		authzEngine: authzEngine,
 	}
 }
 
@@ -93,7 +92,7 @@ func (h *AuthorizationHandler) Check(w http.ResponseWriter, r *http.Request) {
 		TenantID:     tenantIDStr,
 	}
 
-	decision, err := h.authzService.Authorize(r.Context(), authReq)
+	decision, err := h.authzEngine.Authorize(r.Context(), authReq)
 	if err != nil {
 		if errors.Is(err, authorization.ErrPolicyUnavailable) || errors.Is(err, authorization.ErrPolicyStale) {
 			httpx.WriteProblem(

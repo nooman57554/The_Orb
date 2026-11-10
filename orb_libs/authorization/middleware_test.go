@@ -133,4 +133,101 @@ func TestAuthorizer_Middleware(t *testing.T) {
 			t.Errorf("expected 503, got %d", rec.Code)
 		}
 	})
+
+	t.Run("403 Forbidden when tenant is inactive", func(t *testing.T) {
+		inactiveTenant := "01a00000-0000-7000-8000-000000000099"
+		req := httptest.NewRequest(http.MethodPost, "/v1/tenants/"+inactiveTenant+"/users", nil)
+		req.SetPathValue("tenantID", inactiveTenant)
+
+		principal := &identity.Principal{
+			UserID:    tenantUserUUID,
+			SessionID: uuid.New(),
+			TokenID:   uuid.New(),
+		}
+		req = req.WithContext(identity.WithPrincipal(req.Context(), principal))
+		rec := httptest.NewRecorder()
+
+		authorizer.Require(PermTenantUserCreate, RouteParam("tenantID"))(okHandler).ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("expected 403, got %d", rec.Code)
+		}
+	})
+
+	t.Run("403 Forbidden when user is inactive", func(t *testing.T) {
+		inactiveUser := uuid.MustParse("01a00000-0000-7000-8000-000000000040")
+		req := httptest.NewRequest(http.MethodGet, "/v1/tenants", nil)
+
+		principal := &identity.Principal{
+			UserID:    inactiveUser,
+			SessionID: uuid.New(),
+			TokenID:   uuid.New(),
+		}
+		req = req.WithContext(identity.WithPrincipal(req.Context(), principal))
+		rec := httptest.NewRecorder()
+
+		authorizer.Require(PermPlatformTenantList)(okHandler).ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("expected 403 for inactive user, got %d", rec.Code)
+		}
+	})
+
+	t.Run("200 OK ResourceRouteParam self lookup allowed", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/users/"+tenantUserUUID.String(), nil)
+		req.SetPathValue("id", tenantUserUUID.String())
+
+		principal := &identity.Principal{
+			UserID:    tenantUserUUID,
+			SessionID: uuid.New(),
+			TokenID:   uuid.New(),
+		}
+		req = req.WithContext(identity.WithPrincipal(req.Context(), principal))
+		rec := httptest.NewRecorder()
+
+		authorizer.Require(PermPlatformUserRead, ResourceRouteParam("user", "id"))(okHandler).ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Errorf("expected 200 for self profile access, got %d", rec.Code)
+		}
+	})
+
+	t.Run("403 Forbidden ResourceRouteParam other user lookup without permission", func(t *testing.T) {
+		otherUser := "01a00000-0000-7000-8000-000000000099"
+		req := httptest.NewRequest(http.MethodGet, "/v1/users/"+otherUser, nil)
+		req.SetPathValue("id", otherUser)
+
+		principal := &identity.Principal{
+			UserID:    tenantUserUUID,
+			SessionID: uuid.New(),
+			TokenID:   uuid.New(),
+		}
+		req = req.WithContext(identity.WithPrincipal(req.Context(), principal))
+		rec := httptest.NewRecorder()
+
+		authorizer.Require(PermPlatformUserRead, ResourceRouteParam("user", "id"))(okHandler).ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("expected 403 for unauthorized user reading another profile, got %d", rec.Code)
+		}
+	})
+
+	t.Run("400 Bad Request ResourceRouteParam invalid UUID", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/users/not-a-uuid", nil)
+		req.SetPathValue("id", "not-a-uuid")
+
+		principal := &identity.Principal{
+			UserID:    tenantUserUUID,
+			SessionID: uuid.New(),
+			TokenID:   uuid.New(),
+		}
+		req = req.WithContext(identity.WithPrincipal(req.Context(), principal))
+		rec := httptest.NewRecorder()
+
+		authorizer.Require(PermPlatformUserRead, ResourceRouteParam("user", "id"))(okHandler).ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("expected 400 for invalid UUID route parameter, got %d", rec.Code)
+		}
+	})
 }

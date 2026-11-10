@@ -6,13 +6,15 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/nooman57554/The_Orb/orb_libs/authorization"
 	"github.com/nooman57554/The_Orb/orb_libs/dbconnector"
 )
 
 // SnapshotLoader loads a complete, consistent PolicySnapshot from the IAM database.
+// It implements authorization.SnapshotSource.
 type SnapshotLoader interface {
-	LoadSnapshot(ctx context.Context) (*authorization.PolicySnapshot, error)
+	authorization.SnapshotSource
 }
 
 // PostgresSnapshotLoader implements SnapshotLoader using the PostgreSQL connection pool.
@@ -20,15 +22,43 @@ type PostgresSnapshotLoader struct {
 	db *dbconnector.DBConnector
 }
 
+var _ SnapshotLoader = (*PostgresSnapshotLoader)(nil)
+
 func NewPostgresSnapshotLoader(db *dbconnector.DBConnector) *PostgresSnapshotLoader {
 	return &PostgresSnapshotLoader{db: db}
 }
 
-func (l *PostgresSnapshotLoader) LoadSnapshot(ctx context.Context) (*authorization.PolicySnapshot, error) {
-	// 1. Determine current version from outbox or sequence
+// GetLatestVersion returns the current policy version from the outbox sequence table.
+func (l *PostgresSnapshotLoader) GetLatestVersion(ctx context.Context) (int64, error) {
 	var version int64
 	err := l.db.Pool().QueryRow(ctx, "SELECT COALESCE(MAX(version), 1) FROM authz_outbox").Scan(&version)
-	if err != nil || version <= 0 {
+	if err != nil {
+		return 0, fmt.Errorf("query latest policy version: %w", err)
+	}
+	if version <= 0 {
+		return 1, nil
+	}
+	return version, nil
+}
+
+// LoadSnapshot loads a complete, transactionally consistent snapshot using a REPEATABLE READ transaction.
+func (l *PostgresSnapshotLoader) LoadSnapshot(ctx context.Context) (*authorization.PolicySnapshot, error) {
+	tx, err := l.db.Pool().BeginTx(ctx, pgx.TxOptions{
+		IsoLevel:   pgx.RepeatableRead,
+		AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("begin snapshot transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// 1. Determine current version within the same consistent read transaction
+	var version int64
+	err = tx.QueryRow(ctx, "SELECT COALESCE(MAX(version), 1) FROM authz_outbox").Scan(&version)
+	if err != nil {
+		return nil, fmt.Errorf("query policy version: %w", err)
+	}
+	if version <= 0 {
 		version = 1
 	}
 
@@ -36,6 +66,7 @@ func (l *PostgresSnapshotLoader) LoadSnapshot(ctx context.Context) (*authorizati
 		Version:             version,
 		CreatedAt:           time.Now().UTC(),
 		Users:               make(map[string]authorization.UserPolicy),
+		Tenants:             make(map[string]authorization.TenantPolicy),
 		PlatformAssignments: make(map[string]string),
 		TenantAssignments:   make(map[string]map[string]string),
 		Roles:               make(map[string]authorization.RolePolicy),
@@ -43,7 +74,7 @@ func (l *PostgresSnapshotLoader) LoadSnapshot(ctx context.Context) (*authorizati
 	}
 
 	// 2. Load Permissions Catalog
-	permRows, err := l.db.Pool().Query(ctx, "SELECT name, scope FROM permissions")
+	permRows, err := tx.Query(ctx, "SELECT name, scope FROM permissions")
 	if err != nil {
 		return nil, fmt.Errorf("load permissions catalog: %w", err)
 	}
@@ -64,7 +95,7 @@ func (l *PostgresSnapshotLoader) LoadSnapshot(ctx context.Context) (*authorizati
 	}
 
 	// 3. Load Roles
-	roleRows, err := l.db.Pool().Query(ctx, "SELECT id, name, scope, tenant_id FROM roles")
+	roleRows, err := tx.Query(ctx, "SELECT id, name, scope, tenant_id FROM roles")
 	if err != nil {
 		return nil, fmt.Errorf("load roles: %w", err)
 	}
@@ -100,7 +131,7 @@ func (l *PostgresSnapshotLoader) LoadSnapshot(ctx context.Context) (*authorizati
 	}
 
 	// 4. Load Role Permissions
-	rpRows, err := l.db.Pool().Query(ctx, `
+	rpRows, err := tx.Query(ctx, `
 		SELECT rp.role_id, p.name
 		FROM role_permissions rp
 		JOIN permissions p ON p.id = rp.permission_id
@@ -129,7 +160,7 @@ func (l *PostgresSnapshotLoader) LoadSnapshot(ctx context.Context) (*authorizati
 	}
 
 	// 5. Load Users
-	userRows, err := l.db.Pool().Query(ctx, "SELECT id, status FROM users")
+	userRows, err := tx.Query(ctx, "SELECT id, status FROM users")
 	if err != nil {
 		return nil, fmt.Errorf("load users: %w", err)
 	}
@@ -151,8 +182,31 @@ func (l *PostgresSnapshotLoader) LoadSnapshot(ctx context.Context) (*authorizati
 		return nil, fmt.Errorf("users rows error: %w", err)
 	}
 
-	// 6. Load Platform Role Assignments
-	pRows, err := l.db.Pool().Query(ctx, "SELECT user_id, role_id FROM role_assignments WHERE tenant_id IS NULL")
+	// 6. Load Tenants
+	tenantRows, err := tx.Query(ctx, "SELECT id, status FROM tenants")
+	if err != nil {
+		return nil, fmt.Errorf("load tenants: %w", err)
+	}
+	defer tenantRows.Close()
+
+	for tenantRows.Next() {
+		var (
+			tenantID uuid.UUID
+			status   string
+		)
+		if err := tenantRows.Scan(&tenantID, &status); err != nil {
+			return nil, fmt.Errorf("scan tenant: %w", err)
+		}
+		snapshot.Tenants[tenantID.String()] = authorization.TenantPolicy{
+			Active: status == "active",
+		}
+	}
+	if err := tenantRows.Err(); err != nil {
+		return nil, fmt.Errorf("tenants rows error: %w", err)
+	}
+
+	// 7. Load Platform Role Assignments
+	pRows, err := tx.Query(ctx, "SELECT user_id, role_id FROM role_assignments WHERE tenant_id IS NULL")
 	if err != nil {
 		return nil, fmt.Errorf("load platform role assignments: %w", err)
 	}
@@ -172,8 +226,8 @@ func (l *PostgresSnapshotLoader) LoadSnapshot(ctx context.Context) (*authorizati
 		return nil, fmt.Errorf("platform assignments rows error: %w", err)
 	}
 
-	// 7. Load Tenant Role Assignments
-	tRows, err := l.db.Pool().Query(ctx, "SELECT user_id, tenant_id, role_id FROM role_assignments WHERE tenant_id IS NOT NULL")
+	// 8. Load Tenant Role Assignments
+	tRows, err := tx.Query(ctx, "SELECT user_id, tenant_id, role_id FROM role_assignments WHERE tenant_id IS NOT NULL")
 	if err != nil {
 		return nil, fmt.Errorf("load tenant role assignments: %w", err)
 	}
@@ -199,7 +253,7 @@ func (l *PostgresSnapshotLoader) LoadSnapshot(ctx context.Context) (*authorizati
 		return nil, fmt.Errorf("tenant assignments rows error: %w", err)
 	}
 
-	// 8. Validate structural and invariant integrity
+	// 9. Validate structural and invariant integrity
 	if err := snapshot.Validate(); err != nil {
 		return nil, fmt.Errorf("validate loaded snapshot: %w", err)
 	}

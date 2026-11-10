@@ -50,7 +50,6 @@ func TestPermissionHandler_ListPermissions_Success(t *testing.T) {
 
 	holder := authorization.NewSnapshotHolder()
 	engine := authorization.NewLocalEngine(holder)
-	authzService, _ := service.NewAuthorizationService(engine)
 
 	snap := &authorization.PolicySnapshot{
 		Version:   1,
@@ -83,7 +82,7 @@ func TestPermissionHandler_ListPermissions_Success(t *testing.T) {
 	}
 
 	roleService, _ := service.NewRoleService(&mockRoleRepoForPermHandler{}, permRepo)
-	h := handler.NewPermissionHandler(roleService, authzService)
+	h := handler.NewPermissionHandler(roleService, engine)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/permissions", nil)
 	principal := &identity.Principal{UserID: userID, SessionID: uuid.New(), TokenID: uuid.New()}
@@ -122,7 +121,6 @@ func TestPermissionHandler_ListPermissions_Success(t *testing.T) {
 func TestPermissionHandler_ListPermissions_Forbidden(t *testing.T) {
 	holder := authorization.NewSnapshotHolder()
 	engine := authorization.NewLocalEngine(holder)
-	authzService, _ := service.NewAuthorizationService(engine)
 
 	// Empty snapshot - user has no permissions
 	_ = holder.Set(&authorization.PolicySnapshot{
@@ -139,7 +137,7 @@ func TestPermissionHandler_ListPermissions_Forbidden(t *testing.T) {
 
 	permRepo := &mockPermRepoForHandler{}
 	roleService, _ := service.NewRoleService(&mockRoleRepoForPermHandler{}, permRepo)
-	h := handler.NewPermissionHandler(roleService, authzService)
+	h := handler.NewPermissionHandler(roleService, engine)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/permissions", nil)
 	principal := &identity.Principal{UserID: uuid.New(), SessionID: uuid.New(), TokenID: uuid.New()}

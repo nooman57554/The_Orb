@@ -5,6 +5,10 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/nooman57554/The_Orb/orb_libs/authorization"
 	"github.com/nooman57554/The_Orb/orb_libs/dbconnector"
@@ -14,7 +18,6 @@ import (
 	"github.com/nooman57554/The_Orb/services/iam/config"
 	"github.com/nooman57554/The_Orb/services/iam/handler"
 	"github.com/nooman57554/The_Orb/services/iam/keyloader"
-	"github.com/nooman57554/The_Orb/services/iam/middleware"
 	"github.com/nooman57554/The_Orb/services/iam/repository"
 	"github.com/nooman57554/The_Orb/services/iam/service"
 )
@@ -60,13 +63,12 @@ func main() {
 	if err := policyDistService.Bootstrap(ctx); err != nil {
 		log.Printf("warning: policy snapshot bootstrap failed (fail-closed until snapshot loaded): %v", err)
 	}
+	if err := policyDistService.Start(ctx); err != nil {
+		log.Fatalf("start policy distribution service: %v", err)
+	}
+	defer policyDistService.Stop()
 
 	// create core domain services
-	authzService, err := service.NewAuthorizationService(policyDistService.Engine())
-	if err != nil {
-		log.Fatalf("initialize authorization service: %v", err)
-	}
-
 	roleAssignService, err := service.NewRoleAssignmentService(
 		roleAssignRepo,
 		roleRepo,
@@ -117,19 +119,19 @@ func main() {
 	}
 
 	// initialize unified route authorizer middleware
-	authorizer, err := middleware.NewAuthorizer(policyDistService.Engine())
+	authorizer, err := authorization.NewAuthorizer(policyDistService.Engine())
 	if err != nil {
 		log.Fatalf("initialize authorizer middleware: %v", err)
 	}
 
 	// create handlers
 	authHandler := handler.NewAuthHandler(authService)
-	authzHandler := handler.NewAuthorizationHandler(authzService)
-	permHandler := handler.NewPermissionHandler(roleService, authzService)
+	authzHandler := handler.NewAuthorizationHandler(policyDistService.Engine())
+	permHandler := handler.NewPermissionHandler(roleService, policyDistService.Engine())
 	roleHandler := handler.NewRoleHandler(roleService, roleAssignService)
 	tenantHandler := handler.NewTenantHandler(tenantService)
 	tenantUserHandler := handler.NewTenantUserHandler(tenantUserService, roleAssignService)
-	userHandler := handler.NewUserHandler(userService, authzService)
+	userHandler := handler.NewUserHandler(userService)
 
 	// create bearer middleware with default-protected routing and explicit public exemptions
 	bearerMiddleware, err := httpauth.NewBearerMiddleware(
@@ -190,7 +192,7 @@ func main() {
 
 	// User routes
 	mux.HandleFunc("POST /v1/users", userHandler.CreateUser)
-	mux.HandleFunc("GET /v1/users/{id}", userHandler.GetUser)
+	mux.HandleFunc("GET /v1/users/{id}", authorizer.Require(authorization.PermPlatformUserRead, authorization.ResourceRouteParam("user", "id"))(userHandler.GetUser))
 	mux.HandleFunc("POST /v1/users/{id}/deactivate", authorizer.Require(authorization.PermPlatformUserDeactivate)(userHandler.DeactivateUser))
 	mux.HandleFunc("POST /v1/users/{id}/reactivate", authorizer.Require(authorization.PermPlatformUserReactivate)(userHandler.ReactivateUser))
 
@@ -204,9 +206,23 @@ func main() {
 
 	log.Printf("IAM server starting on %s", cfg.HTTPAddr)
 
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("IAM server failed: %v", err)
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("IAM server failed: %v", err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	log.Println("Shutting down IAM server...")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("Server shutdown warning: %v", err)
 	}
+	log.Println("IAM server exited cleanly")
 }
 
 func initAuth(cfg config.Config) (*auth.JWTManager, *jwtverify.Verifier, error) {

@@ -21,7 +21,6 @@ import (
 	"github.com/nooman57554/The_Orb/orb_libs/identity/jwtverify"
 	"github.com/nooman57554/The_Orb/services/iam/auth"
 	"github.com/nooman57554/The_Orb/services/iam/handler"
-	"github.com/nooman57554/The_Orb/services/iam/middleware"
 	"github.com/nooman57554/The_Orb/services/iam/model"
 	"github.com/nooman57554/The_Orb/services/iam/repository"
 	"github.com/nooman57554/The_Orb/services/iam/service"
@@ -128,7 +127,6 @@ func (m *mockTenantRepository) SetStatus(ctx context.Context, id uuid.UUID, stat
 type tenantFixture struct {
 	tenantRepo       *mockTenantRepository
 	authzRepo        *mockAuthzRepository
-	authzService     *service.AuthorizationService
 	tenantHandler    *handler.TenantHandler
 	jwtManager       *auth.JWTManager
 	sessionChecker   *mockSessionChecker
@@ -141,10 +139,6 @@ func setupTenantFixture(t *testing.T) *tenantFixture {
 
 	tenantRepo := newMockTenantRepository()
 	authzRepo := newMockAuthzRepository()
-	authzService, err := service.NewAuthorizationService(authzRepo)
-	if err != nil {
-		t.Fatalf("create authorization service: %v", err)
-	}
 
 	tenantService, _ := service.NewTenantService(tenantRepo)
 	tenantHandler := handler.NewTenantHandler(tenantService)
@@ -191,7 +185,7 @@ func setupTenantFixture(t *testing.T) *tenantFixture {
 		t.Fatalf("create bearer middleware: %v", err)
 	}
 
-	authorizer, err := middleware.NewAuthorizer(authzService.Engine())
+	authorizer, err := authorization.NewAuthorizer(authzRepo)
 	if err != nil {
 		t.Fatalf("create authorizer: %v", err)
 	}
@@ -205,7 +199,6 @@ func setupTenantFixture(t *testing.T) *tenantFixture {
 	return &tenantFixture{
 		tenantRepo:       tenantRepo,
 		authzRepo:        authzRepo,
-		authzService:     authzService,
 		tenantHandler:    tenantHandler,
 		jwtManager:       jwtManager,
 		sessionChecker:   sessionChecker,

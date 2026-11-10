@@ -12,18 +12,13 @@ import (
 	"github.com/nooman57554/The_Orb/orb_libs/authorization"
 	"github.com/nooman57554/The_Orb/orb_libs/identity"
 	"github.com/nooman57554/The_Orb/services/iam/handler"
-	"github.com/nooman57554/The_Orb/services/iam/service"
 )
 
 func TestAuthorizationHandler_Check_Allowed(t *testing.T) {
 	holder := authorization.NewSnapshotHolder()
 	engine := authorization.NewLocalEngine(holder)
-	authzService, err := service.NewAuthorizationService(engine)
-	if err != nil {
-		t.Fatalf("failed to create authorization service: %v", err)
-	}
 
-	h := handler.NewAuthorizationHandler(authzService)
+	h := handler.NewAuthorizationHandler(engine)
 
 	userID := uuid.New()
 	tenantID := uuid.New()
@@ -89,12 +84,8 @@ func TestAuthorizationHandler_Check_Allowed(t *testing.T) {
 func TestAuthorizationHandler_Check_Denied(t *testing.T) {
 	holder := authorization.NewSnapshotHolder()
 	engine := authorization.NewLocalEngine(holder)
-	authzService, err := service.NewAuthorizationService(engine)
-	if err != nil {
-		t.Fatalf("failed to create authorization service: %v", err)
-	}
 
-	h := handler.NewAuthorizationHandler(authzService)
+	h := handler.NewAuthorizationHandler(engine)
 
 	userID := uuid.New()
 	tenantID := uuid.New()
@@ -151,8 +142,7 @@ func TestAuthorizationHandler_Check_Denied(t *testing.T) {
 func TestAuthorizationHandler_Check_Unauthenticated(t *testing.T) {
 	holder := authorization.NewSnapshotHolder()
 	engine := authorization.NewLocalEngine(holder)
-	authzService, _ := service.NewAuthorizationService(engine)
-	h := handler.NewAuthorizationHandler(authzService)
+	h := handler.NewAuthorizationHandler(engine)
 
 	body, _ := json.Marshal(map[string]any{
 		"action": authorization.PermTenantUserRead,

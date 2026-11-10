@@ -11,17 +11,17 @@ import (
 )
 
 type PermissionHandler struct {
-	roleService  *service.RoleService
-	authzService *service.AuthorizationService
+	roleService *service.RoleService
+	authzEngine authorization.Engine
 }
 
 func NewPermissionHandler(
 	roleService *service.RoleService,
-	authzService *service.AuthorizationService,
+	authzEngine authorization.Engine,
 ) *PermissionHandler {
 	return &PermissionHandler{
-		roleService:  roleService,
-		authzService: authzService,
+		roleService: roleService,
+		authzEngine: authzEngine,
 	}
 }
 
@@ -70,7 +70,7 @@ func (h *PermissionHandler) ListPermissions(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	decision, err := h.authzService.Authorize(r.Context(), authReq)
+	decision, err := h.authzEngine.Authorize(r.Context(), authReq)
 	if err != nil {
 		httpx.WriteProblem(
 			w,
@@ -91,7 +91,7 @@ func (h *PermissionHandler) ListPermissions(w http.ResponseWriter, r *http.Reque
 				Permission: authorization.PermTenantPermissionRead,
 				TenantID:   principal.TenantID.String(),
 			}
-			if fbDec, fbErr := h.authzService.Authorize(r.Context(), fallbackReq); fbErr == nil && fbDec.Allowed {
+			if fbDec, fbErr := h.authzEngine.Authorize(r.Context(), fallbackReq); fbErr == nil && fbDec.Allowed {
 				allowed = true
 			}
 		}

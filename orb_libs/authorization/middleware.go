@@ -28,11 +28,23 @@ func (a *Authorizer) Engine() Engine {
 	return a.engine
 }
 
-// Require protects an http.HandlerFunc with the specified canonical permission and optional tenant scope resolvers.
-// For tenant-scoped permissions, at least one resolver should be supplied (e.g. RouteParam("tenantID")).
-// If no resolver is supplied for a tenant-scoped permission, FromContext() is used as fallback.
-func (a *Authorizer) Require(permission string, resolvers ...TenantResolver) func(http.HandlerFunc) http.HandlerFunc {
+// Require protects an http.HandlerFunc with the specified canonical permission and optional resolvers.
+// Resolvers may implement TenantResolver (e.g. RouteParam("tenantID")) and/or ResourceResolver (e.g. ResourceRouteParam("user", "id")).
+// If no TenantResolver is supplied for a tenant-scoped permission, FromContext() is used as fallback.
+func (a *Authorizer) Require(permission string, resolvers ...any) func(http.HandlerFunc) http.HandlerFunc {
 	perm := strings.TrimSpace(permission)
+
+	var tenantResolver TenantResolver
+	var resourceResolver ResourceResolver
+
+	for _, res := range resolvers {
+		switch r := res.(type) {
+		case TenantResolver:
+			tenantResolver = r
+		case ResourceResolver:
+			resourceResolver = r
+		}
+	}
 
 	return func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -74,8 +86,8 @@ func (a *Authorizer) Require(permission string, resolvers ...TenantResolver) fun
 			var tenantID string
 			if scope == ScopeTenant {
 				var resolveErr error
-				if len(resolvers) > 0 && resolvers[0] != nil {
-					tenantID, resolveErr = resolvers[0].ResolveTenant(r)
+				if tenantResolver != nil {
+					tenantID, resolveErr = tenantResolver.ResolveTenant(r)
 				} else {
 					tenantID, resolveErr = FromContext().ResolveTenant(r)
 				}
@@ -91,14 +103,32 @@ func (a *Authorizer) Require(permission string, resolvers ...TenantResolver) fun
 				}
 			}
 
-			// 4. Construct AuthorizationRequest
-			req := AuthorizationRequest{
-				Principal:  principal,
-				Permission: perm,
-				TenantID:   tenantID,
+			// 4. Resolve resource if resourceResolver provided
+			var resType, resID string
+			if resourceResolver != nil {
+				var resErr error
+				resType, resID, resErr = resourceResolver.ResolveResource(r)
+				if resErr != nil {
+					httpx.WriteProblem(
+						w,
+						http.StatusBadRequest,
+						"Invalid Request",
+						fmt.Sprintf("Resource scope resolution failed: %v", resErr),
+					)
+					return
+				}
 			}
 
-			// 5. Evaluate authorization against local engine
+			// 5. Construct AuthorizationRequest
+			req := AuthorizationRequest{
+				Principal:    principal,
+				Permission:   perm,
+				TenantID:     tenantID,
+				ResourceType: resType,
+				ResourceID:   resID,
+			}
+
+			// 6. Evaluate authorization against local engine
 			decision, err := a.engine.Authorize(r.Context(), req)
 			if err != nil {
 				if errors.Is(err, ErrPolicyUnavailable) || errors.Is(err, ErrPolicyStale) {
@@ -121,22 +151,36 @@ func (a *Authorizer) Require(permission string, resolvers ...TenantResolver) fun
 			}
 
 			if !decision.Allowed {
-				if decision.Reason == ReasonUnauthenticated {
+				switch decision.Reason {
+				case ReasonUnauthenticated:
 					httpx.WriteProblem(
 						w,
 						http.StatusUnauthorized,
 						"Unauthorized",
 						"Authentication is required.",
 					)
-					return
+				case ReasonUserInactive:
+					httpx.WriteProblem(
+						w,
+						http.StatusForbidden,
+						"Forbidden",
+						"The authenticated user is inactive.",
+					)
+				case ReasonTenantInactive:
+					httpx.WriteProblem(
+						w,
+						http.StatusForbidden,
+						"Forbidden",
+						"The specified tenant is inactive or suspended.",
+					)
+				default:
+					httpx.WriteProblem(
+						w,
+						http.StatusForbidden,
+						"Forbidden",
+						"You do not have the required permissions to perform this action.",
+					)
 				}
-
-				httpx.WriteProblem(
-					w,
-					http.StatusForbidden,
-					"Forbidden",
-					"You do not have the required permissions to perform this action.",
-				)
 				return
 			}
 
@@ -147,7 +191,7 @@ func (a *Authorizer) Require(permission string, resolvers ...TenantResolver) fun
 }
 
 // RequireHandler wraps a standard http.Handler with the common authorization policy.
-func (a *Authorizer) RequireHandler(permission string, resolvers ...TenantResolver) func(http.Handler) http.Handler {
+func (a *Authorizer) RequireHandler(permission string, resolvers ...any) func(http.Handler) http.Handler {
 	wrapper := a.Require(permission, resolvers...)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(wrapper(next.ServeHTTP))

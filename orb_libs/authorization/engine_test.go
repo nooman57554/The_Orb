@@ -32,12 +32,18 @@ func makeTestSnapshot(version int64, createdAt time.Time) *PolicySnapshot {
 			userTenantMemberA: {Active: true},
 			userInactive:      {Active: false},
 		},
+		Tenants: map[string]TenantPolicy{
+			tenantA:                                {Active: true},
+			"01a00000-0000-7000-8000-000000000002": {Active: true},  // Tenant B (Active)
+			"01a00000-0000-7000-8000-000000000099": {Active: false}, // Inactive Tenant
+		},
 		PlatformAssignments: map[string]string{
 			userPlatformAdmin: rolePlatformAdminID,
 		},
 		TenantAssignments: map[string]map[string]string{
 			userTenantAdminA: {
-				tenantA: roleTenantAdminRWID,
+				tenantA:                                roleTenantAdminRWID,
+				"01a00000-0000-7000-8000-000000000099": roleTenantAdminRWID,
 			},
 			userTenantMemberA: {
 				tenantA: roleTenantUserID,
@@ -281,6 +287,34 @@ func TestLocalEngine_InactiveUserDenied(t *testing.T) {
 	})
 	if err != nil || d.Allowed || d.Reason != ReasonUserInactive {
 		t.Errorf("expected user_inactive denial, got: %+v, err: %v", d, err)
+	}
+}
+
+func TestLocalEngine_InactiveTenantDenied(t *testing.T) {
+	ctx := context.Background()
+	holder := NewSnapshotHolder()
+	snapshot := makeTestSnapshot(1, time.Now())
+	if err := holder.Set(snapshot); err != nil {
+		t.Fatalf("set snapshot: %v", err)
+	}
+
+	engine := NewLocalEngine(holder)
+
+	tenantAdminUUID := uuid.MustParse("01a00000-0000-7000-8000-000000000020")
+	inactiveTenant := "01a00000-0000-7000-8000-000000000099"
+	principal := &identity.Principal{
+		UserID:    tenantAdminUUID,
+		SessionID: uuid.New(),
+		TokenID:   uuid.New(),
+	}
+
+	d, err := engine.Authorize(ctx, AuthorizationRequest{
+		Principal:  principal,
+		Permission: PermTenantUserCreate,
+		TenantID:   inactiveTenant,
+	})
+	if err != nil || d.Allowed || d.Reason != ReasonTenantInactive {
+		t.Errorf("expected tenant_inactive denial for inactive tenant, got: %+v, err: %v", d, err)
 	}
 }
 

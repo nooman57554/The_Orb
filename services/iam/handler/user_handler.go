@@ -9,25 +9,20 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/nooman57554/The_Orb/orb_libs/authorization"
 	"github.com/nooman57554/The_Orb/orb_libs/httpx"
-	"github.com/nooman57554/The_Orb/orb_libs/identity"
 	"github.com/nooman57554/The_Orb/services/iam/repository"
 	"github.com/nooman57554/The_Orb/services/iam/service"
 )
 
 type UserHandler struct {
-	userService  *service.UserService
-	authzService *service.AuthorizationService
+	userService *service.UserService
 }
 
 func NewUserHandler(
 	userService *service.UserService,
-	authzService *service.AuthorizationService,
 ) *UserHandler {
 	return &UserHandler{
-		userService:  userService,
-		authzService: authzService,
+		userService: userService,
 	}
 }
 
@@ -146,17 +141,6 @@ func (h *UserHandler) GetUser(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	principal, ok := identity.PrincipalFromContext(r.Context())
-	if !ok || principal == nil || !principal.IsValid() {
-		httpx.WriteProblem(
-			w,
-			http.StatusUnauthorized,
-			"Unauthorized",
-			"Authentication is required.",
-		)
-		return
-	}
-
 	userID, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		httpx.WriteProblem(
@@ -164,56 +148,6 @@ func (h *UserHandler) GetUser(
 			http.StatusBadRequest,
 			"Invalid Request",
 			"User ID must be a valid UUID.",
-		)
-		return
-	}
-
-	// Authorize using the shared authorization engine:
-	// Self-profile access is handled via resource ownership (ResourceID == principal.UserID).
-	// Reading other profiles requires platform.user.read.
-	authReq := authorization.AuthorizationRequest{
-		Principal:    principal,
-		Permission:   authorization.PermPlatformUserRead,
-		ResourceType: "user",
-		ResourceID:   userID.String(),
-	}
-
-	decision, err := h.authzService.Authorize(r.Context(), authReq)
-	if err != nil {
-		if errors.Is(err, authorization.ErrPolicyUnavailable) || errors.Is(err, authorization.ErrPolicyStale) {
-			httpx.WriteProblem(
-				w,
-				http.StatusServiceUnavailable,
-				"Service Unavailable",
-				"Authorization policy is temporarily unavailable.",
-			)
-			return
-		}
-		httpx.WriteProblem(
-			w,
-			http.StatusInternalServerError,
-			"Internal Server Error",
-			"An unexpected error occurred.",
-		)
-		return
-	}
-
-	if !decision.Allowed {
-		if decision.Reason == authorization.ReasonUnauthenticated {
-			httpx.WriteProblem(
-				w,
-				http.StatusUnauthorized,
-				"Unauthorized",
-				"Authentication is required.",
-			)
-			return
-		}
-
-		httpx.WriteProblem(
-			w,
-			http.StatusForbidden,
-			"Forbidden",
-			"You are not authorized to access this resource.",
 		)
 		return
 	}

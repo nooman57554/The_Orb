@@ -60,3 +60,34 @@ func (ContextResolver) ResolveTenant(r *http.Request) (string, error) {
 func FromContext() TenantResolver {
 	return ContextResolver{}
 }
+
+// ResourceResolver extracts the target resource type and resource ID for resource-level authorization.
+type ResourceResolver interface {
+	ResolveResource(r *http.Request) (resourceType string, resourceID string, err error)
+}
+
+// RouteParamResourceResolver resolves the resource ID from a specified path parameter and attaches a fixed resource type.
+type RouteParamResourceResolver struct {
+	ResourceType string
+	ParamName    string
+}
+
+func (p RouteParamResourceResolver) ResolveResource(r *http.Request) (string, string, error) {
+	val := strings.TrimSpace(r.PathValue(p.ParamName))
+	if val == "" {
+		return "", "", fmt.Errorf("missing resource parameter %q", p.ParamName)
+	}
+	parsed, err := uuid.Parse(val)
+	if err != nil || parsed == uuid.Nil {
+		return "", "", fmt.Errorf("resource ID must be a valid UUID: %q", val)
+	}
+	return p.ResourceType, parsed.String(), nil
+}
+
+// ResourceRouteParam returns a ResourceResolver that extracts the resource ID from an HTTP route parameter.
+func ResourceRouteParam(resourceType, paramName string) ResourceResolver {
+	return RouteParamResourceResolver{
+		ResourceType: resourceType,
+		ParamName:    paramName,
+	}
+}

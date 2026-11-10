@@ -315,8 +315,9 @@ type handlerFixture struct {
 	userRepo         *mockUserRepository
 	authzRepo        *mockAuthzRepository
 	userService      *service.UserService
-	authzService     *service.AuthorizationService
+	authorizer       *authorization.Authorizer
 	userHandler      *handler.UserHandler
+	getUserHandler   http.HandlerFunc
 	jwtManager       *auth.JWTManager
 	sessionChecker   *mockSessionChecker
 	bearerMiddleware *httpauth.BearerMiddleware
@@ -328,11 +329,15 @@ func setupHandlerFixture(t *testing.T) *handlerFixture {
 	userRepo := newMockUserRepository()
 	authzRepo := newMockAuthzRepository()
 	userService := service.NewUserService(userRepo)
-	authzService, err := service.NewAuthorizationService(authzRepo)
+	authorizer, err := authorization.NewAuthorizer(authzRepo)
 	if err != nil {
-		t.Fatalf("create authorization service: %v", err)
+		t.Fatalf("create authorizer: %v", err)
 	}
-	userHandler := handler.NewUserHandler(userService, authzService)
+	userHandler := handler.NewUserHandler(userService)
+	getUserHandler := authorizer.Require(
+		authorization.PermPlatformUserRead,
+		authorization.ResourceRouteParam("user", "id"),
+	)(userHandler.GetUser)
 
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -375,8 +380,9 @@ func setupHandlerFixture(t *testing.T) *handlerFixture {
 		userRepo:         userRepo,
 		authzRepo:        authzRepo,
 		userService:      userService,
-		authzService:     authzService,
+		authorizer:       authorizer,
 		userHandler:      userHandler,
+		getUserHandler:   getUserHandler,
 		jwtManager:       jwtManager,
 		sessionChecker:   sessionChecker,
 		bearerMiddleware: bearerMiddleware,
@@ -391,7 +397,7 @@ func TestUserHandler_GetUser_NoToken(t *testing.T) {
 	req.SetPathValue("id", userID.String())
 	rec := httptest.NewRecorder()
 
-	f.userHandler.GetUser(rec, req)
+	f.getUserHandler(rec, req)
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("expected status %d, got %d", http.StatusUnauthorized, rec.Code)
@@ -441,7 +447,7 @@ func TestUserHandler_GetUser_SelfLookup_Success(t *testing.T) {
 	req = req.WithContext(ctx)
 
 	rec := httptest.NewRecorder()
-	f.userHandler.GetUser(rec, req)
+	f.getUserHandler(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d. Body: %s", http.StatusOK, rec.Code, rec.Body.String())
@@ -492,7 +498,7 @@ func TestUserHandler_GetUser_OtherUserLookup_Forbidden(t *testing.T) {
 	req = req.WithContext(ctx)
 
 	rec := httptest.NewRecorder()
-	f.userHandler.GetUser(rec, req)
+	f.getUserHandler(rec, req)
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("expected status %d, got %d. Body: %s", http.StatusForbidden, rec.Code, rec.Body.String())
@@ -527,7 +533,7 @@ func TestUserHandler_GetUser_InvalidPathUUID_BadRequest(t *testing.T) {
 	req = req.WithContext(ctx)
 
 	rec := httptest.NewRecorder()
-	f.userHandler.GetUser(rec, req)
+	f.getUserHandler(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected status %d, got %d. Body: %s", http.StatusBadRequest, rec.Code, rec.Body.String())
@@ -563,7 +569,7 @@ func TestUserHandler_GetUser_NonExistentUser_NotFound(t *testing.T) {
 	req = req.WithContext(ctx)
 
 	rec := httptest.NewRecorder()
-	f.userHandler.GetUser(rec, req)
+	f.getUserHandler(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected status %d, got %d. Body: %s", http.StatusNotFound, rec.Code, rec.Body.String())
@@ -604,7 +610,7 @@ func TestUserHandler_GetUser_SpoofedHeaderIgnored(t *testing.T) {
 	req = req.WithContext(ctx)
 
 	rec := httptest.NewRecorder()
-	f.userHandler.GetUser(rec, req)
+	f.getUserHandler(rec, req)
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("expected status %d, got %d. Header spoofing was not blocked!", http.StatusForbidden, rec.Code)
@@ -634,7 +640,7 @@ func TestUserHandler_GetUser_PlatformAdmin_OtherUserLookup_Success(t *testing.T)
 	req = req.WithContext(ctx)
 
 	rec := httptest.NewRecorder()
-	f.userHandler.GetUser(rec, req)
+	f.getUserHandler(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 OK for platform admin reading another user, got %d: %s", rec.Code, rec.Body.String())
@@ -676,7 +682,7 @@ func TestUserHandler_GetUser_TenantAdmin_OtherUserLookup_Forbidden(t *testing.T)
 	req = req.WithContext(ctx)
 
 	rec := httptest.NewRecorder()
-	f.userHandler.GetUser(rec, req)
+	f.getUserHandler(rec, req)
 
 	// CRITICAL RULE: Tenant-scoped tenant.user.read must NOT grant platform-wide user lookup!
 	if rec.Code != http.StatusForbidden {
@@ -706,7 +712,7 @@ func TestUserHandler_GetUser_AuthzDBError_Returns500(t *testing.T) {
 	req = req.WithContext(ctx)
 
 	rec := httptest.NewRecorder()
-	f.userHandler.GetUser(rec, req)
+	f.getUserHandler(rec, req)
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500 Internal Server Error on database error, got %d: %s", rec.Code, rec.Body.String())
@@ -728,7 +734,7 @@ func TestFullRoute_ServeMux_Integration(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/users", f.userHandler.CreateUser)
-	mux.HandleFunc("GET /v1/users/{id}", f.userHandler.GetUser)
+	mux.HandleFunc("GET /v1/users/{id}", f.getUserHandler)
 
 	appHandler := f.bearerMiddleware.Require(mux)
 

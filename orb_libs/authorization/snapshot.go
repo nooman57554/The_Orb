@@ -20,6 +20,11 @@ const (
 	RoleScopeCustomTenant RoleScope = "custom_tenant"
 )
 
+// TenantPolicy contains authorization-relevant state for a tenant.
+type TenantPolicy struct {
+	Active bool `json:"active"`
+}
+
 // UserPolicy contains authorization-relevant state for a user.
 type UserPolicy struct {
 	Active bool `json:"active"`
@@ -45,6 +50,7 @@ type PolicySnapshot struct {
 	Version             int64                           `json:"version"`
 	CreatedAt           time.Time                       `json:"created_at"`
 	Users               map[string]UserPolicy           `json:"users"`
+	Tenants             map[string]TenantPolicy         `json:"tenants"`              // TenantID -> TenantPolicy
 	PlatformAssignments map[string]string               `json:"platform_assignments"` // UserID -> RoleID
 	TenantAssignments   map[string]map[string]string    `json:"tenant_assignments"`   // UserID -> TenantID -> RoleID
 	Roles               map[string]RolePolicy           `json:"roles"`                // RoleID -> RolePolicy
@@ -111,10 +117,24 @@ func (s *PolicySnapshot) Validate() error {
 	return nil
 }
 
+// SnapshotStatus provides diagnostic and health observability for the authorization snapshot.
+type SnapshotStatus struct {
+	Version               int64         `json:"version"`
+	CreatedAt             time.Time     `json:"created_at"`
+	Age                   time.Duration `json:"age"`
+	LastSuccessfulRefresh time.Time     `json:"last_successful_refresh"`
+	LastRefreshError      string        `json:"last_refresh_error,omitempty"`
+	IsReady               bool          `json:"is_ready"`
+	IsStale               bool          `json:"is_stale"`
+}
+
 // SnapshotHolder provides thread-safe access and atomic monotonic updates for a PolicySnapshot.
 type SnapshotHolder struct {
-	mu       sync.RWMutex
-	snapshot *PolicySnapshot
+	mu                    sync.RWMutex
+	snapshot              *PolicySnapshot
+	lastSuccessfulRefresh time.Time
+	lastRefreshError      error
+	lastRefreshAttempt    time.Time
 }
 
 // NewSnapshotHolder creates an empty SnapshotHolder.
@@ -148,6 +168,8 @@ func (h *SnapshotHolder) Set(newSnapshot *PolicySnapshot) error {
 	}
 
 	h.snapshot = newSnapshot
+	h.lastSuccessfulRefresh = time.Now()
+	h.lastRefreshError = nil
 	return nil
 }
 
@@ -179,4 +201,65 @@ func (h *SnapshotHolder) IsReady() bool {
 	defer h.mu.RUnlock()
 
 	return h.snapshot != nil
+}
+
+// RecordRefreshSuccess records that a refresh succeeded.
+func (h *SnapshotHolder) RecordRefreshSuccess(t time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.lastSuccessfulRefresh = t
+	h.lastRefreshAttempt = t
+	h.lastRefreshError = nil
+}
+
+// RecordRefreshFailure records that a refresh failed.
+func (h *SnapshotHolder) RecordRefreshFailure(err error, t time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.lastRefreshError = err
+	h.lastRefreshAttempt = t
+}
+
+// LastSuccessfulRefresh returns the timestamp of the last successful policy refresh.
+func (h *SnapshotHolder) LastSuccessfulRefresh() time.Time {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	return h.lastSuccessfulRefresh
+}
+
+// LastRefreshError returns the last recorded policy refresh error, or nil if healthy.
+func (h *SnapshotHolder) LastRefreshError() error {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	return h.lastRefreshError
+}
+
+// Status returns a health and freshness summary of the SnapshotHolder.
+func (h *SnapshotHolder) Status(maxPolicyAge ...time.Duration) SnapshotStatus {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	status := SnapshotStatus{
+		LastSuccessfulRefresh: h.lastSuccessfulRefresh,
+		IsReady:               h.snapshot != nil,
+	}
+
+	if h.lastRefreshError != nil {
+		status.LastRefreshError = h.lastRefreshError.Error()
+	}
+
+	if h.snapshot != nil {
+		status.Version = h.snapshot.Version
+		status.CreatedAt = h.snapshot.CreatedAt
+		status.Age = time.Since(h.snapshot.CreatedAt)
+		if len(maxPolicyAge) > 0 && maxPolicyAge[0] > 0 {
+			status.IsStale = status.Age > maxPolicyAge[0]
+		}
+	}
+
+	return status
 }
